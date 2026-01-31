@@ -1,0 +1,9 @@
+-- AlterTable
+ALTER TABLE "attendance_raw_rows" ALTER COLUMN "employeeName" SET DATA TYPE VARCHAR(500),
+ALTER COLUMN "shift" SET DATA TYPE VARCHAR(255),
+ALTER COLUMN "clockIn" SET DATA TYPE VARCHAR(100),
+ALTER COLUMN "clockOut" SET DATA TYPE VARCHAR(100);
+
+-- AlterTable
+ALTER TABLE "shift_templates" ALTER COLUMN "ndStartTime" SET DEFAULT '22:00:00'::time,
+ALTER COLUMN "ndEndTime" SET DEFAULT '06:00:00'::time;

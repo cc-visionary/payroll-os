@@ -1,0 +1,1783 @@
+// ============================================================================
+// PayrollOS PH - Prisma Schema (V1)
+// ============================================================================
+// This schema implements the PayrollOS data model for Philippine payroll.
+//
+// Key Design Decisions:
+// 1. Single-tenant for V1 (GameCove only) - companyId included for future multi-tenant
+// 2. Soft deletes via deletedAt on core entities (employees, shifts, etc.)
+// 3. Immutable audit trail - raw time logs and audit logs are append-only
+// 4. Versioned rulesets - payroll computations link to specific rule versions
+// 5. Source traceability - every payslip line links back to attendance records
+// 6. UUID primary keys for all tables (better for distributed systems)
+//
+// Naming Conventions:
+// - Tables: PascalCase (Prisma convention)
+// - Columns: camelCase (Prisma convention, maps to snake_case in Postgres)
+// - Enums: SCREAMING_SNAKE_CASE for values
+// ============================================================================
+
+generator client {
+  provider        = "prisma-client-js"
+  output          = "../app/generated/prisma"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  // URL configuration moved to prisma.config.ts (Prisma 7+)
+  extensions = [pgcrypto] // For gen_random_uuid()
+}
+
+// ============================================================================
+// ENUMS
+// ============================================================================
+
+// --- User & Auth ---
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+  LOCKED
+  PENDING_VERIFICATION
+}
+
+// --- Employment ---
+// Note: HiringEntity is now a model (see hiring_entities table) instead of an enum
+// to support multiple legal entities with their own government registrations.
+
+enum EmploymentType {
+  REGULAR       // Regular/permanent employment
+  PROBATIONARY  // Probationary period (max 6 months per PH Labor Code)
+  CONTRACTUAL   // Fixed-term / project-based employment
+  CONSULTANT    // Professional services / consultant
+  INTERN        // OJT / internship program
+  SEASONAL      // Seasonal employment (e.g., agricultural, holiday retail)
+  CASUAL        // Casual employment (less than one year cumulative service)
+}
+
+enum EmploymentStatus {
+  ACTIVE          // Currently employed
+  RESIGNED        // Voluntary separation
+  TERMINATED      // Involuntary separation (just cause / authorized cause)
+  AWOL            // Absence without leave (constructive dismissal)
+  DECEASED        // Employee passed away
+  END_OF_CONTRACT // Contract/project employment ended
+  RETIRED         // Retirement (voluntary or mandatory)
+}
+
+enum WageType {
+  MONTHLY
+  DAILY
+  HOURLY
+}
+
+enum PayFrequency {
+  MONTHLY
+  SEMI_MONTHLY
+  BI_WEEKLY
+  WEEKLY
+}
+
+enum EmploymentEventType {
+  HIRE
+  REGULARIZATION
+  SALARY_CHANGE
+  ROLE_CHANGE
+  DEPARTMENT_TRANSFER
+  PROMOTION
+  DEMOTION
+  PENALTY_ISSUED
+  INCIDENT_REPORTED
+  COMMENDATION
+  SEPARATION_INITIATED
+  SEPARATION_CONFIRMED
+  REHIRE
+  STATUS_CHANGE
+  DECLARED_WAGE_OVERRIDE
+}
+
+enum EmploymentEventStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+// --- Hiring / Applicants ---
+enum ApplicantStatus {
+  NEW // Just applied
+  SCREENING // Under initial review
+  INTERVIEW // Scheduled/in interview process
+  ASSESSMENT // Taking assessment/test
+  OFFER // Offer extended
+  OFFER_ACCEPTED // Offer accepted, pending onboarding
+  HIRED // Converted to employee
+  REJECTED // Not moving forward
+  WITHDRAWN // Applicant withdrew
+}
+
+enum InterviewType {
+  PHONE_SCREEN
+  TECHNICAL
+  BEHAVIORAL
+  PANEL
+  FINAL
+}
+
+enum InterviewResult {
+  PENDING
+  PASSED
+  FAILED
+  NO_SHOW
+  RESCHEDULED
+}
+
+// --- Timekeeping ---
+enum ShiftBreakType {
+  FIXED
+  AUTO_DEDUCT
+  NO_BREAK
+}
+
+enum AttendanceSource {
+  LARK_IMPORT
+  MANUAL
+  BIOMETRIC
+  SYSTEM
+}
+
+enum AttendanceStatus {
+  PRESENT
+  ABSENT
+  HALF_DAY
+  ON_LEAVE
+  REST_DAY
+  HOLIDAY
+}
+
+enum DayType {
+  WORKDAY
+  REST_DAY
+  REGULAR_HOLIDAY
+  SPECIAL_HOLIDAY
+  SPECIAL_WORKING
+}
+
+// NOTE: AdjustmentType enum removed - adjustments now stored directly on AttendanceDayRecord
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+// --- Import ---
+enum ImportStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  PARTIALLY_COMPLETED
+}
+
+// NOTE: ImportRowStatus enum removed - raw rows no longer stored separately
+
+// --- Leave ---
+enum LeaveAccrualType {
+  NONE
+  MONTHLY
+  ANNUAL
+  TENURE_BASED
+}
+
+enum LeaveRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+// --- Payroll ---
+enum PayrollRunStatus {
+  DRAFT
+  COMPUTING
+  REVIEW
+  APPROVED
+  RELEASED
+  CANCELLED
+}
+
+enum PayslipLineCategory {
+  // Earnings
+  BASIC_PAY
+  OVERTIME_REGULAR
+  OVERTIME_REST_DAY
+  OVERTIME_HOLIDAY
+  NIGHT_DIFFERENTIAL
+  HOLIDAY_PAY
+  REST_DAY_PAY
+  ALLOWANCE
+  REIMBURSEMENT
+  INCENTIVE
+  BONUS
+  ADJUSTMENT_ADD
+  THIRTEENTH_MONTH_PAY
+  // Deductions
+  LATE_DEDUCTION
+  UNDERTIME_DEDUCTION
+  LATE_UT_DEDUCTION // Combined Late + Undertime deduction
+  ABSENT_DEDUCTION
+  SSS_EE
+  SSS_ER
+  PHILHEALTH_EE
+  PHILHEALTH_ER
+  PAGIBIG_EE
+  PAGIBIG_ER
+  TAX_WITHHOLDING
+  CASH_ADVANCE_DEDUCTION
+  LOAN_DEDUCTION
+  ADJUSTMENT_DEDUCT
+  OTHER_DEDUCTION
+}
+
+// Note: StatutoryType enum removed - statutory tables now use constants
+
+// --- Audit ---
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+  APPROVE
+  REJECT
+  LOGIN
+  LOGOUT
+  EXPORT
+  IMPORT
+}
+
+// ============================================================================
+// COMPANY & ORGANIZATION
+// ============================================================================
+
+/// Company is the top-level tenant entity.
+/// V1 supports single company (GameCove); V2 will add multi-tenant.
+model Company {
+  id                   String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  code                 String    @unique @db.VarChar(20)
+  name                 String    @db.VarChar(255)
+  tradeName            String?   @db.VarChar(255)
+  tin                  String?   @db.VarChar(20)
+  sssEmployerId        String?   @db.VarChar(20)
+  philhealthEmployerId String?   @db.VarChar(20)
+  pagibigEmployerId    String?   @db.VarChar(20)
+  addressLine1         String?   @db.VarChar(255)
+  addressLine2         String?   @db.VarChar(255)
+  city                 String?   @db.VarChar(100)
+  province             String?   @db.VarChar(100)
+  zipCode              String?   @db.VarChar(10)
+  country              String    @default("PH") @db.VarChar(2)
+  rdoCode              String?   @db.VarChar(10)
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+  deletedAt            DateTime?
+
+  // Relations
+  departments      Department[]
+  employees        Employee[]
+  shiftTemplates   ShiftTemplate[]
+  leaveTypes       LeaveType[]
+  payrollCalendars PayrollCalendar[]
+  holidayCalendars HolidayCalendar[]
+  users            User[]
+  roleScorecards   RoleScorecard[]
+  applicants       Applicant[]
+  userCompanies    UserCompany[]
+  checkInPeriods   CheckInPeriod[]
+  hiringEntities   HiringEntity[]
+
+  @@index([code])
+  @@map("companies")
+}
+
+/// HiringEntity represents a legal entity that can hire employees.
+/// A company can have multiple hiring entities (e.g., GameCove, Luxium) each with
+/// their own government registrations (TIN, SSS, PhilHealth, Pag-IBIG).
+model HiringEntity {
+  id        String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId String  @db.Uuid
+  code      String  @db.VarChar(20)
+  name      String  @db.VarChar(255) // Legal company name
+  tradeName String? @db.VarChar(255) // DBA / Trade name
+
+  // Government Registration
+  tin                  String? @db.VarChar(20)
+  rdoCode              String? @db.VarChar(10)
+  sssEmployerId        String? @db.VarChar(20)
+  philhealthEmployerId String? @db.VarChar(20)
+  pagibigEmployerId    String? @db.VarChar(20)
+
+  // Business Address
+  addressLine1 String? @db.VarChar(255)
+  addressLine2 String? @db.VarChar(255)
+  city         String? @db.VarChar(100)
+  province     String? @db.VarChar(100)
+  zipCode      String? @db.VarChar(10)
+  country      String  @default("PH") @db.VarChar(2)
+
+  // Contact
+  phoneNumber String? @db.VarChar(20)
+  email       String? @db.VarChar(255)
+
+  // Status
+  isActive  Boolean   @default(true)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  // Relations
+  company    Company     @relation(fields: [companyId], references: [id])
+  employees  Employee[]
+  applicants Applicant[]
+
+  @@unique([companyId, code])
+  @@index([companyId])
+  @@map("hiring_entities")
+}
+
+/// Department within a company
+model Department {
+  id                 String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId          String    @db.Uuid
+  code               String    @db.VarChar(20)
+  name               String    @db.VarChar(255)
+  parentDepartmentId String?   @db.Uuid
+  costCenterCode     String?   @db.VarChar(20)
+  managerId          String?   @db.Uuid
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  deletedAt          DateTime?
+
+  // Relations
+  company          Company         @relation(fields: [companyId], references: [id])
+  parentDepartment Department?     @relation("DepartmentHierarchy", fields: [parentDepartmentId], references: [id])
+  childDepartments Department[]    @relation("DepartmentHierarchy")
+  manager          Employee?       @relation("DepartmentManager", fields: [managerId], references: [id])
+  employees        Employee[]
+  roleScorecards   RoleScorecard[]
+  applicants       Applicant[]     @relation("ApplicantDepartment")
+
+  @@unique([companyId, code])
+  @@index([companyId])
+  @@map("departments")
+}
+
+// ============================================================================
+// ROLE SCORECARD
+// ============================================================================
+
+/// RoleScorecard defines responsibilities and KPIs for a job title/position.
+/// This serves as Annex A in employment contracts.
+model RoleScorecard {
+  id        String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId String @db.Uuid
+
+  // Position identification
+  jobTitle     String  @db.VarChar(100)
+  departmentId String? @db.Uuid
+
+  // Mission & Responsibilities
+  missionStatement    String @db.Text
+  keyResponsibilities Json // Array of { area: string, tasks: string[] }
+
+  // KPIs
+  kpis Json // Array of { metric: string, frequency: string }
+
+  // Compensation - salary range for this role
+  salaryRangeMin Decimal? @db.Decimal(12, 2) // Minimum salary for this role
+  salaryRangeMax Decimal? @db.Decimal(12, 2) // Maximum salary for this role
+  baseSalary     Decimal? @db.Decimal(12, 2) // Default/standard salary for this role
+  wageType       WageType @default(MONTHLY) // How salary is computed
+
+  // Work Schedule - link to shift template
+  shiftTemplateId   String? @db.Uuid // Reference to shift template
+  workHoursPerDay   Int     @default(8)
+  workDaysPerWeek   String  @default("Monday to Saturday") @db.VarChar(100)
+  flexibleStartTime String? @db.VarChar(50) // e.g., "9:00 AM to 10:00 AM"
+  flexibleEndTime   String? @db.VarChar(50) // e.g., "6:00 PM to 7:00 PM"
+
+  // Status
+  isActive       Boolean  @default(true)
+  effectiveDate  DateTime @db.Date
+  supersededById String?  @db.Uuid
+
+  // Metadata
+  createdById String?  @db.Uuid
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  company          Company         @relation(fields: [companyId], references: [id])
+  department       Department?     @relation(fields: [departmentId], references: [id])
+  shiftTemplate    ShiftTemplate?  @relation("RoleScorecardShift", fields: [shiftTemplateId], references: [id])
+  createdBy        User?           @relation("ScorecardCreator", fields: [createdById], references: [id])
+  supersededBy     RoleScorecard?  @relation("ScorecardVersion", fields: [supersededById], references: [id])
+  previousVersions RoleScorecard[] @relation("ScorecardVersion")
+  employees        Employee[]      @relation("EmployeeRoleScorecard")
+  applicants       Applicant[]     @relation("ApplicantPosition")
+
+  @@unique([companyId, jobTitle, effectiveDate])
+  @@index([companyId, jobTitle])
+  @@index([departmentId])
+  @@index([shiftTemplateId])
+  @@map("role_scorecards")
+}
+
+// ============================================================================
+// HIRING / APPLICANT TRACKING
+// ============================================================================
+
+/// Applicant tracks job applicants through the hiring pipeline.
+model Applicant {
+  id        String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId String @db.Uuid
+
+  // Personal Information
+  firstName    String  @db.VarChar(100)
+  middleName   String? @db.VarChar(100)
+  lastName     String  @db.VarChar(100)
+  suffix       String? @db.VarChar(20)
+  email        String  @db.VarChar(255)
+  phoneNumber  String? @db.VarChar(20)
+  mobileNumber String? @db.VarChar(20)
+
+  // Application Details
+  roleScorecardId String? @db.Uuid // Position applied for
+  customJobTitle  String? @db.VarChar(100) // If no roleScorecard
+  departmentId    String? @db.Uuid
+  hiringEntityId  String? @db.Uuid // Legal entity for hiring
+  source          String? @db.VarChar(100) // e.g., "LinkedIn", "Referral", "Job Board"
+  referredById    String? @db.Uuid // If referred by an employee
+
+  // Resume & Documents
+  resumePath      String? @db.VarChar(500)
+  resumeFileName  String? @db.VarChar(255)
+  coverLetterPath String? @db.VarChar(500)
+  portfolioUrl    String? @db.VarChar(500)
+  linkedinUrl     String? @db.VarChar(500)
+
+  // Generated Documents
+  offerLetterPath String? @db.VarChar(500)
+
+  // Salary Expectation
+  expectedSalaryMin Decimal?  @db.Decimal(12, 2)
+  expectedSalaryMax Decimal?  @db.Decimal(12, 2)
+  expectedStartDate DateTime? @db.Date
+
+  // Pipeline Status
+  status            ApplicantStatus @default(NEW)
+  statusChangedAt   DateTime        @default(now())
+  statusChangedById String?         @db.Uuid
+
+  // Notes
+  notes            String? @db.Text
+  rejectionReason  String? @db.Text
+  withdrawalReason String? @db.Text
+
+  // Conversion
+  convertedToEmployeeId String?   @unique @db.Uuid
+  convertedAt           DateTime?
+
+  // Metadata
+  appliedAt   DateTime  @default(now())
+  createdById String?   @db.Uuid
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  // Relations
+  company             Company        @relation(fields: [companyId], references: [id])
+  roleScorecard       RoleScorecard? @relation("ApplicantPosition", fields: [roleScorecardId], references: [id])
+  department          Department?    @relation("ApplicantDepartment", fields: [departmentId], references: [id])
+  hiringEntity        HiringEntity?  @relation(fields: [hiringEntityId], references: [id])
+  referredBy          Employee?      @relation("ApplicantReferrer", fields: [referredById], references: [id])
+  statusChangedBy     User?          @relation("ApplicantStatusChanger", fields: [statusChangedById], references: [id])
+  createdBy           User?          @relation("ApplicantCreator", fields: [createdById], references: [id])
+  convertedToEmployee Employee?      @relation("ApplicantConversion", fields: [convertedToEmployeeId], references: [id])
+  interviews          Interview[]
+
+  @@index([companyId, status])
+  @@index([companyId, roleScorecardId])
+  @@index([email])
+  @@map("applicants")
+}
+
+/// Interview tracks scheduled interviews for applicants.
+model Interview {
+  id          String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  applicantId String @db.Uuid
+
+  // Interview Details
+  interviewType InterviewType
+  title         String?       @db.VarChar(255)
+  description   String?       @db.Text
+
+  // Scheduling
+  scheduledDate      DateTime @db.Date
+  scheduledStartTime DateTime @db.Time(0)
+  scheduledEndTime   DateTime @db.Time(0)
+  location           String?  @db.VarChar(255) // Room or virtual meeting link
+  isVirtual          Boolean  @default(false)
+  meetingLink        String?  @db.VarChar(500)
+
+  // Interviewers
+  primaryInterviewerId String?  @db.Uuid
+  interviewerIds       String[] @db.Uuid // Additional interviewers
+
+  // Result
+  result         InterviewResult @default(PENDING)
+  resultNotes    String?         @db.Text
+  rating         Int? // 1-5 scale
+  strengths      String?         @db.Text
+  concerns       String?         @db.Text
+  recommendation String?         @db.Text
+
+  // Metadata
+  createdById String?  @db.Uuid
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  applicant          Applicant @relation(fields: [applicantId], references: [id], onDelete: Cascade)
+  primaryInterviewer Employee? @relation("InterviewPrimaryInterviewer", fields: [primaryInterviewerId], references: [id])
+  createdBy          User?     @relation("InterviewCreator", fields: [createdById], references: [id])
+
+  @@index([applicantId])
+  @@index([scheduledDate])
+  @@index([primaryInterviewerId])
+  @@map("interviews")
+}
+
+// ============================================================================
+// USER & AUTH
+// ============================================================================
+
+/// User represents a login account. May or may not be linked to an Employee.
+model User {
+  id               String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId        String     @db.Uuid
+  email            String     @unique @db.VarChar(255)
+  passwordHash     String     @db.VarChar(255)
+  status           UserStatus @default(PENDING_VERIFICATION)
+  emailVerifiedAt  DateTime?
+  mfaEnabled       Boolean    @default(false)
+  mfaSecret        String?    @db.VarChar(255)
+  lastLoginAt      DateTime?
+  failedLoginCount Int        @default(0)
+  lockedUntil      DateTime?
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
+  deletedAt        DateTime?
+
+  // Relations
+  company   Company    @relation(fields: [companyId], references: [id])
+  employee  Employee?
+  userRoles UserRole[]
+  auditLogs AuditLog[] @relation("AuditLogUser")
+  sessions  Session[]
+
+  // Inverse relations for "approved by" / "created by" fields
+  approvedEmploymentEvents  EmploymentEvent[]      @relation("EmploymentEventApprover")
+  requestedEmploymentEvents EmploymentEvent[]      @relation("EmploymentEventRequester")
+  enteredAttendanceRecords  AttendanceDayRecord[]  @relation("AttendanceEnteredBy")
+  overrideAttendanceRecords AttendanceDayRecord[]  @relation("AttendanceOverrideBy")
+  approvedLeaveRequests     LeaveRequest[]         @relation("LeaveApprover")
+  approvedPayrollRuns       PayrollRun[]           @relation("PayrollApprover")
+  createdPayrollRuns        PayrollRun[]           @relation("PayrollCreator")
+  uploadedDocuments         EmployeeDocument[]     @relation("DocumentUploader")
+  acknowledgedDocuments     EmployeeDocument[]     @relation("DocumentAcknowledger")
+  verifiedStatutoryIds  EmployeeStatutoryId[] @relation("StatutoryIdVerifier")
+  generatedExports      ExportArtifact[]      @relation("ExportGenerator")
+  createdRoleScorecards RoleScorecard[]       @relation("ScorecardCreator")
+
+  // Hiring/Applicant relations
+  createdApplicants       Applicant[] @relation("ApplicantCreator")
+  statusChangedApplicants Applicant[] @relation("ApplicantStatusChanger")
+  createdInterviews       Interview[] @relation("InterviewCreator")
+
+  // Multi-company access
+  userCompanies UserCompany[]
+
+  // Performance Check-ins
+  reviewedCheckIns PerformanceCheckIn[] @relation("CheckInReviewer")
+
+  // Declared Wage Override
+  declaredWageOverrideEmployees Employee[] @relation("DeclaredWageSetBy")
+
+  @@index([companyId])
+  @@index([email])
+  @@map("users")
+}
+
+/// Role defines a set of permissions
+model Role {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  code        String   @unique @db.VarChar(50)
+  name        String   @db.VarChar(100)
+  description String?  @db.Text
+  permissions Json     @default("[]") // Array of permission strings
+  isSystem    Boolean  @default(false) // System roles cannot be deleted
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  userRoles UserRole[]
+
+  @@map("roles")
+}
+
+/// UserRole is the join table for User <-> Role (many-to-many)
+model UserRole {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId    String   @db.Uuid
+  roleId    String   @db.Uuid
+  createdAt DateTime @default(now())
+
+  // Relations
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, roleId])
+  @@map("user_roles")
+}
+
+/// UserCompany is the join table for User <-> Company (many-to-many)
+/// Allows users to access multiple companies
+model UserCompany {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId    String   @db.Uuid
+  companyId String   @db.Uuid
+  isDefault Boolean  @default(false) // User's default company on login
+  createdAt DateTime @default(now())
+
+  // Relations
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, companyId])
+  @@index([userId])
+  @@index([companyId])
+  @@map("user_companies")
+}
+
+/// Session for JWT refresh token tracking
+model Session {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId       String   @db.Uuid
+  refreshToken String   @unique @db.VarChar(500)
+  userAgent    String?  @db.VarChar(500)
+  ipAddress    String?  @db.VarChar(45)
+  expiresAt    DateTime
+  createdAt    DateTime @default(now())
+
+  // Relations
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+// ============================================================================
+// EMPLOYEE & HR CORE
+// ============================================================================
+
+/// Employee is the canonical employee record (201 file).
+/// NOTE: employeeNumber is the business identifier, id is the technical UUID.
+model Employee {
+  id             String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId      String  @db.Uuid
+  employeeNumber String  @db.VarChar(20)
+  userId         String? @unique @db.Uuid
+
+  // Personal Info
+  firstName   String    @db.VarChar(100)
+  middleName  String?   @db.VarChar(100)
+  lastName    String    @db.VarChar(100)
+  suffix      String?   @db.VarChar(20)
+  nickname    String?   @db.VarChar(50)
+  birthDate   DateTime? @db.Date
+  gender      String?   @db.VarChar(10)
+  civilStatus String?   @db.VarChar(20)
+  nationality String    @default("Filipino") @db.VarChar(50)
+
+  // Contact Info
+  personalEmail String? @db.VarChar(255)
+  workEmail     String? @db.VarChar(255)
+  mobileNumber  String? @db.VarChar(20)
+  phoneNumber   String? @db.VarChar(20)
+
+  // Present Address
+  presentAddressLine1 String? @db.VarChar(255)
+  presentAddressLine2 String? @db.VarChar(255)
+  presentCity         String? @db.VarChar(100)
+  presentProvince     String? @db.VarChar(100)
+  presentZipCode      String? @db.VarChar(10)
+
+  // Permanent Address
+  permanentAddressLine1 String? @db.VarChar(255)
+  permanentAddressLine2 String? @db.VarChar(255)
+  permanentCity         String? @db.VarChar(100)
+  permanentProvince     String? @db.VarChar(100)
+  permanentZipCode      String? @db.VarChar(10)
+
+  // Emergency Contact
+  emergencyContactName         String? @db.VarChar(100)
+  emergencyContactNumber       String? @db.VarChar(20)
+  emergencyContactRelationship String? @db.VarChar(50)
+
+  // Employment Core
+  departmentId       String?          @db.Uuid
+  roleScorecardId    String?          @db.Uuid // Links to position/role scorecard
+  jobTitle           String?          @db.VarChar(100) // Derived from roleScorecard or custom
+  jobLevel           String?          @db.VarChar(50)
+  reportsToId        String?          @db.Uuid
+  hiringEntityId     String?          @db.Uuid // Links to the legal entity that hired this employee
+  employmentType     EmploymentType   @default(PROBATIONARY)
+  employmentStatus   EmploymentStatus @default(ACTIVE)
+  hireDate           DateTime         @db.Date
+  regularizationDate DateTime?        @db.Date
+  separationDate     DateTime?        @db.Date
+  separationReason   String?          @db.VarChar(50)
+
+  // Payroll Classification
+  isRankAndFile        Boolean @default(true)
+  isOtEligible         Boolean @default(true)
+  isNdEligible         Boolean @default(true)
+  isHolidayPayEligible Boolean @default(true)
+
+  // Declared Wage Override (SUPER_ADMIN only)
+  // Purpose: Override RoleScorecard baseSalary for tax/benefits calculations
+  declaredWageOverride    Decimal?  @db.Decimal(12, 2)
+  declaredWageType        WageType?
+  declaredWageEffectiveAt DateTime?
+  declaredWageSetById     String?   @db.Uuid
+  declaredWageSetAt       DateTime?
+  declaredWageReason      String?   @db.Text
+
+  // Tax Calculation Mode (SUPER_ADMIN only)
+  // When true: Withholding tax uses full taxable earnings (earnings - statutory - non-taxable)
+  // When false (default): Withholding tax uses only Basic Pay - Late/Undertime
+  taxOnFullEarnings Boolean @default(false)
+
+  // Lark Integration (for name matching during import)
+  larkUserId     String? @db.VarChar(100)
+  larkEmployeeId String? @db.VarChar(100)
+
+  // Metadata
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  // Relations
+  company            Company        @relation(fields: [companyId], references: [id])
+  user               User?          @relation(fields: [userId], references: [id])
+  department         Department?    @relation(fields: [departmentId], references: [id])
+  roleScorecard      RoleScorecard? @relation("EmployeeRoleScorecard", fields: [roleScorecardId], references: [id])
+  reportsTo          Employee?      @relation("EmployeeReportsTo", fields: [reportsToId], references: [id])
+  hiringEntity       HiringEntity?  @relation(fields: [hiringEntityId], references: [id])
+  declaredWageSetBy  User?          @relation("DeclaredWageSetBy", fields: [declaredWageSetById], references: [id])
+  directReports      Employee[]     @relation("EmployeeReportsTo")
+  managedDepartments Department[]   @relation("DepartmentManager")
+
+  // Related entities
+  statutoryIds      EmployeeStatutoryId[]
+  bankAccounts      EmployeeBankAccount[]
+  employmentEvents  EmploymentEvent[]
+  documents         EmployeeDocument[]
+  attendanceRecords AttendanceDayRecord[]
+  leaveBalances     LeaveBalance[]
+  leaveRequests     LeaveRequest[]
+  payslips          Payslip[]
+
+  // Hiring/Applicant relations
+  referredApplicants     Applicant[] @relation("ApplicantReferrer")
+  convertedFromApplicant Applicant?  @relation("ApplicantConversion")
+  conductedInterviews    Interview[] @relation("InterviewPrimaryInterviewer")
+
+  // Performance Check-ins
+  performanceCheckIns PerformanceCheckIn[] @relation("EmployeeCheckIns")
+
+  @@unique([companyId, employeeNumber])
+  @@index([companyId, employmentStatus])
+  @@index([departmentId])
+  @@index([roleScorecardId])
+  @@index([larkUserId])
+  @@index([lastName, firstName]) // For name-based search
+  @@map("employees")
+}
+
+/// EmployeeStatutoryId stores government ID numbers (SSS, PhilHealth, Pag-IBIG, TIN)
+model EmployeeStatutoryId {
+  id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  employeeId   String    @db.Uuid
+  idType       String    @db.VarChar(20) // sss, philhealth, pagibig, tin
+  idNumber     String    @db.VarChar(50)
+  verifiedAt   DateTime?
+  verifiedById String?   @db.Uuid
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  // Relations
+  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  verifiedBy User?    @relation("StatutoryIdVerifier", fields: [verifiedById], references: [id])
+
+  @@unique([employeeId, idType])
+  @@map("employee_statutory_ids")
+}
+
+/// EmployeeBankAccount stores bank details for disbursement
+model EmployeeBankAccount {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  employeeId    String    @db.Uuid
+  bankCode      String    @db.VarChar(20)
+  bankName      String    @db.VarChar(100)
+  accountNumber String    @db.VarChar(50) // Should be encrypted at application level
+  accountName   String    @db.VarChar(255)
+  accountType   String?   @db.VarChar(20) // savings, checking
+  isPrimary     Boolean   @default(false)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  deletedAt     DateTime?
+
+  // Relations
+  employee Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  @@index([employeeId])
+  @@map("employee_bank_accounts")
+}
+
+
+/// EmploymentEvent tracks lifecycle events (hire, regularization, salary change, etc.)
+model EmploymentEvent {
+  id              String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  employeeId      String                @db.Uuid
+  eventType       EmploymentEventType
+  eventDate       DateTime              @db.Date
+  payload         Json // Event-specific data
+  status          EmploymentEventStatus @default(PENDING)
+  requestedById   String?               @db.Uuid
+  approvedById    String?               @db.Uuid
+  approvedAt      DateTime?
+  rejectionReason String?               @db.Text
+  remarks         String?               @db.Text
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+
+  // Relations
+  employee    Employee           @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  requestedBy User?              @relation("EmploymentEventRequester", fields: [requestedById], references: [id])
+  approvedBy  User?              @relation("EmploymentEventApprover", fields: [approvedById], references: [id])
+  documents   EmployeeDocument[] @relation("EventDocuments")
+
+  @@index([employeeId, eventType])
+  @@index([eventDate])
+  @@map("employment_events")
+}
+
+/// EmployeeDocument stores uploaded and generated documents
+model EmployeeDocument {
+  id           String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  employeeId   String  @db.Uuid
+  documentType String  @db.VarChar(50)
+  title        String  @db.VarChar(255)
+  description  String? @db.Text
+
+  // File Storage
+  filePath      String  @db.VarChar(500)
+  fileName      String  @db.VarChar(255)
+  fileSizeBytes BigInt?
+  mimeType      String? @db.VarChar(100)
+
+  // Generation (if system-generated)
+  generatedFromTemplateId String? @db.Uuid
+  generatedFromEventId    String? @db.Uuid
+  templateVersion         Int?
+
+  // Acknowledgment
+  requiresAcknowledgment Boolean   @default(false)
+  acknowledgedAt         DateTime?
+  acknowledgedById       String?   @db.Uuid
+
+  // Metadata
+  uploadedById String?   @db.Uuid
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  deletedAt    DateTime?
+
+  // Relations
+  employee           Employee         @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  generatedFromEvent EmploymentEvent? @relation("EventDocuments", fields: [generatedFromEventId], references: [id])
+  uploadedBy         User?            @relation("DocumentUploader", fields: [uploadedById], references: [id])
+  acknowledgedBy     User?            @relation("DocumentAcknowledger", fields: [acknowledgedById], references: [id])
+
+  @@index([employeeId, documentType])
+  @@map("employee_documents")
+}
+
+// ============================================================================
+// TIMEKEEPING
+// ============================================================================
+
+/// ShiftTemplate defines reusable shift configurations
+model ShiftTemplate {
+  id        String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId String @db.Uuid
+  code      String @db.VarChar(20)
+  name      String @db.VarChar(100)
+
+  // Time Configuration
+  startTime   DateTime @db.Time(0)
+  endTime     DateTime @db.Time(0)
+  isOvernight Boolean  @default(false)
+
+  // Break Configuration
+  breakType      ShiftBreakType @default(AUTO_DEDUCT)
+  breakMinutes   Int            @default(60)
+  breakStartTime DateTime?      @db.Time(0)
+  breakEndTime   DateTime?      @db.Time(0)
+
+  // Grace Period
+  graceMinutesLate     Int @default(0)
+  graceMinutesEarlyOut Int @default(0)
+
+  // Work Hours
+  scheduledWorkMinutes Int
+
+  // Overtime Thresholds
+  otEarlyInEnabled      Boolean @default(false)
+  otEarlyInStartMinutes Int     @default(0)
+  otLateOutStartMinutes Int     @default(0)
+  maxOtEarlyInMinutes   Int?
+  maxOtLateOutMinutes   Int?
+  maxOtTotalMinutes     Int?
+
+  // Night Differential
+  ndStartTime DateTime @default(dbgenerated("'22:00:00'::time")) @db.Time(0)
+  ndEndTime   DateTime @default(dbgenerated("'06:00:00'::time")) @db.Time(0)
+
+  // Metadata
+  isActive  Boolean   @default(true)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  // Relations
+  company           Company               @relation(fields: [companyId], references: [id])
+  attendanceRecords AttendanceDayRecord[]
+  roleScorecards    RoleScorecard[]       @relation("RoleScorecardShift")
+
+  @@unique([companyId, code])
+  @@index([companyId, isActive])
+  @@map("shift_templates")
+}
+
+/// AttendanceImport tracks file import batches
+model AttendanceImport {
+  id        String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId String  @db.Uuid
+  fileName  String  @db.VarChar(255)
+  filePath  String  @db.VarChar(500)
+  fileSize  BigInt?
+  fileHash  String? @db.VarChar(64) // SHA-256 for dedup
+
+  // Import Configuration
+  columnMapping Json? // Column mapping configuration
+
+  // Status
+  status        ImportStatus @default(PENDING)
+  totalRows     Int          @default(0)
+  processedRows Int          @default(0)
+  validRows     Int          @default(0)
+  invalidRows   Int          @default(0)
+  duplicateRows Int          @default(0)
+
+  // Processing
+  startedAt    DateTime?
+  completedAt  DateTime?
+  errorMessage String?   @db.Text
+
+  // Metadata
+  uploadedById String?  @db.Uuid
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // Relations
+  attendanceRecords AttendanceDayRecord[]
+
+  @@index([companyId, createdAt])
+  @@index([fileHash])
+  @@map("attendance_imports")
+}
+
+// NOTE: AttendanceRawRow model has been removed.
+// All imports now write directly to AttendanceDayRecord.
+// The import tracking is stored in the AttendanceImport model with counts.
+
+
+/// AttendanceDayRecord is the single source of truth for attendance per employee-day.
+/// Stores both raw time data, computed values for payroll, and any overrides.
+/// All imports write directly here. No separate raw/override tables needed.
+model AttendanceDayRecord {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  employeeId     String   @db.Uuid
+  attendanceDate DateTime @db.Date
+
+  // Schedule Context - link to shift template for schedule info
+  shiftTemplateId String? @db.Uuid
+
+  // Day Type
+  dayType   DayType
+  holidayId String? @db.Uuid
+
+  // Raw Time Data (source of truth)
+  actualTimeIn  DateTime? @db.Timestamptz
+  actualTimeOut DateTime? @db.Timestamptz
+
+  // Source Tracking (for audit trail)
+  sourceType     AttendanceSource @default(MANUAL)
+  sourceBatchId  String?          @db.Uuid // Links to AttendanceImport
+  sourceRecordId String?          @db.VarChar(100) // External ID from source system
+
+  // Manual Entry Fields
+  enteredById  String? @db.Uuid
+  manualReason String? @db.Text
+
+  // Attendance Status (derived from actual times but stored for quick filtering)
+  attendanceStatus AttendanceStatus
+
+  // OT/Deduction Approval Flags (stored directly on record, no separate override table)
+  // OT requires approval - if not approved, early in/late out doesn't count as OT
+  earlyInApproved  Boolean @default(false) // Approve clock in before shift start (counts as OT)
+  lateOutApproved  Boolean @default(false) // Approve clock out after shift end (counts as OT)
+  // Late/Undertime auto-deducted - approval clears the deduction
+  lateInApproved   Boolean @default(false) // Excuse late arrival (clear late minutes)
+  earlyOutApproved Boolean @default(false) // Excuse early departure (clear undertime)
+
+  // Override reason (when any approval flag is set or manual changes made)
+  overrideReason     String? @db.Text
+  overrideReasonCode String? @db.VarChar(50)
+  overrideById       String? @db.Uuid
+  overrideAt         DateTime?
+
+  // Break Override (null = use shift template's breakMinutes, 0 = no break, >0 = override)
+  breakMinutesApplied Int?
+
+  // Leave Info
+  leaveRequestId String?  @db.Uuid
+  leaveHours     Decimal? @db.Decimal(4, 2)
+
+  // Lock Status
+  isLocked             Boolean   @default(false)
+  lockedByPayrollRunId String?   @db.Uuid
+  lockedAt             DateTime?
+
+  // Metadata
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  employee           Employee          @relation(fields: [employeeId], references: [id])
+  shiftTemplate      ShiftTemplate?    @relation(fields: [shiftTemplateId], references: [id])
+  holiday            CalendarEvent?    @relation(fields: [holidayId], references: [id])
+  sourceBatch        AttendanceImport? @relation(fields: [sourceBatchId], references: [id])
+  enteredBy          User?             @relation("AttendanceEnteredBy", fields: [enteredById], references: [id])
+  overrideBy         User?             @relation("AttendanceOverrideBy", fields: [overrideById], references: [id])
+  leaveRequest       LeaveRequest?     @relation(fields: [leaveRequestId], references: [id])
+  lockedByPayrollRun PayrollRun?       @relation("LockedAttendance", fields: [lockedByPayrollRunId], references: [id])
+  payslipLines       PayslipLine[]     @relation("AttendanceSourceLines")
+
+  @@unique([employeeId, attendanceDate])
+  @@index([attendanceDate])
+  @@index([lockedByPayrollRunId])
+  @@index([sourceBatchId])
+  @@map("attendance_day_records")
+}
+
+// NOTE: AttendanceAdjustment and AttendanceOverride models have been removed.
+// All overrides and adjustments are now stored directly on AttendanceDayRecord.
+// - earlyInApproved, lateOutApproved: OT approval flags
+// - lateInApproved, earlyOutApproved: Late/Undertime excuse flags
+// - overrideReason, overrideReasonCode: Reason tracking
+// - overrideById, overrideAt: Audit fields
+
+// ============================================================================
+// LEAVE MANAGEMENT
+// ============================================================================
+
+/// LeaveType defines company-configurable leave types
+model LeaveType {
+  id          String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId   String  @db.Uuid
+  code        String  @db.VarChar(20)
+  name        String  @db.VarChar(100)
+  description String? @db.Text
+
+  // Accrual Configuration
+  accrualType   LeaveAccrualType
+  accrualAmount Decimal?         @db.Decimal(5, 2)
+  accrualCap    Decimal?         @db.Decimal(5, 2)
+
+  // Eligibility
+  minTenureDays          Int     @default(0)
+  requiresRegularization Boolean @default(false)
+
+  // Behavior
+  isPaid                Boolean  @default(true)
+  isConvertible         Boolean  @default(false)
+  conversionRate        Decimal  @default(1.0) @db.Decimal(5, 4)
+  canCarryOver          Boolean  @default(false)
+  carryOverCap          Decimal? @db.Decimal(5, 2)
+  carryOverExpiryMonths Int?
+
+  // Workflow
+  requiresAttachment Boolean @default(false)
+  requiresApproval   Boolean @default(true)
+  minAdvanceDays     Int     @default(0)
+
+  // Metadata
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  company       Company        @relation(fields: [companyId], references: [id])
+  leaveBalances LeaveBalance[]
+  leaveRequests LeaveRequest[]
+
+  @@unique([companyId, code])
+  @@map("leave_types")
+}
+
+/// LeaveBalance tracks leave credits per employee per year
+model LeaveBalance {
+  id          String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  employeeId  String @db.Uuid
+  leaveTypeId String @db.Uuid
+  year        Int
+
+  // Balance
+  openingBalance Decimal @default(0) @db.Decimal(6, 2)
+  accrued        Decimal @default(0) @db.Decimal(6, 2)
+  used           Decimal @default(0) @db.Decimal(6, 2)
+  forfeited      Decimal @default(0) @db.Decimal(6, 2)
+  converted      Decimal @default(0) @db.Decimal(6, 2)
+  adjusted       Decimal @default(0) @db.Decimal(6, 2)
+  // currentBalance is computed: opening + accrued - used - forfeited - converted + adjusted
+
+  // Carry Over
+  carriedOverFromPrevious Decimal   @default(0) @db.Decimal(6, 2)
+  carryOverExpiryDate     DateTime? @db.Date
+
+  // Metadata
+  lastAccrualDate DateTime? @db.Date
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  // Relations
+  employee      Employee       @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  leaveType     LeaveType      @relation(fields: [leaveTypeId], references: [id])
+  leaveRequests LeaveRequest[]
+
+  @@unique([employeeId, leaveTypeId, year])
+  @@map("leave_balances")
+}
+
+/// LeaveRequest stores leave applications with approval workflow
+model LeaveRequest {
+  id          String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  employeeId  String @db.Uuid
+  leaveTypeId String @db.Uuid
+
+  // Request Details
+  startDate DateTime @db.Date
+  endDate   DateTime @db.Date
+  leaveDays Decimal  @db.Decimal(5, 2)
+  startHalf String?  @db.VarChar(20) // first_half, second_half
+  endHalf   String?  @db.VarChar(20)
+  reason    String?  @db.Text
+
+  // Attachment
+  attachmentPath     String? @db.VarChar(500)
+  attachmentFilename String? @db.VarChar(255)
+
+  // Workflow
+  status             LeaveRequestStatus @default(PENDING)
+  requestedAt        DateTime           @default(now())
+  approvedById       String?            @db.Uuid
+  approvedAt         DateTime?
+  rejectionReason    String?            @db.Text
+  cancelledAt        DateTime?
+  cancellationReason String?            @db.Text
+
+  // Balance Impact
+  balanceDeducted Decimal? @db.Decimal(5, 2)
+  leaveBalanceId  String?  @db.Uuid
+
+  // Metadata
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  employee          Employee              @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  leaveType         LeaveType             @relation(fields: [leaveTypeId], references: [id])
+  approvedBy        User?                 @relation("LeaveApprover", fields: [approvedById], references: [id])
+  leaveBalance      LeaveBalance?         @relation(fields: [leaveBalanceId], references: [id])
+  attendanceRecords AttendanceDayRecord[]
+
+  @@index([employeeId, startDate, endDate])
+  @@index([status])
+  @@map("leave_requests")
+}
+
+// ============================================================================
+// HOLIDAY CALENDAR
+// ============================================================================
+
+/// HolidayCalendar represents a calendar year's holiday configuration
+model HolidayCalendar {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId String   @db.Uuid
+  year      Int
+  name      String   @db.VarChar(100) // e.g., "GameCove 2024 Calendar"
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  company Company         @relation(fields: [companyId], references: [id])
+  events  CalendarEvent[]
+
+  @@unique([companyId, year])
+  @@map("holiday_calendars")
+}
+
+/// CalendarEvent stores individual holidays
+model CalendarEvent {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  calendarId  String   @db.Uuid
+  date        DateTime @db.Date
+  name        String   @db.VarChar(255)
+  dayType     DayType
+  isNational  Boolean  @default(true) // false = company-specific
+  isRecurring Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  calendar          HolidayCalendar       @relation(fields: [calendarId], references: [id], onDelete: Cascade)
+  attendanceRecords AttendanceDayRecord[]
+
+  @@unique([calendarId, date])
+  @@index([date])
+  @@map("calendar_events")
+}
+
+// ============================================================================
+// PAYROLL
+// ============================================================================
+
+/// PayrollCalendar defines pay periods for the company
+model PayrollCalendar {
+  id           String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId    String       @db.Uuid
+  year         Int
+  payFrequency PayFrequency
+
+  // Metadata
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  company    Company     @relation(fields: [companyId], references: [id])
+  payPeriods PayPeriod[]
+
+  @@unique([companyId, year, payFrequency])
+  @@map("payroll_calendars")
+}
+
+/// PayPeriod defines a specific pay period
+model PayPeriod {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  calendarId   String   @db.Uuid
+  code         String   @db.VarChar(100) // e.g., "2024-01A", "2024-01B", or custom names
+  startDate    DateTime @db.Date
+  endDate      DateTime @db.Date
+  cutoffDate   DateTime @db.Date // Attendance cutoff
+  payDate      DateTime @db.Date
+  periodNumber Int // 1, 2, 3... within the year
+
+  // Metadata
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  calendar    PayrollCalendar @relation(fields: [calendarId], references: [id], onDelete: Cascade)
+  payrollRuns PayrollRun[]
+
+  @@unique([calendarId, code])
+  @@index([startDate, endDate])
+  @@map("pay_periods")
+}
+
+/// PayrollRun represents a payroll computation batch
+model PayrollRun {
+  id          String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  payPeriodId String @db.Uuid
+
+  // Status
+  status PayrollRunStatus @default(DRAFT)
+
+  // Totals (computed)
+  totalGrossPay   Decimal @default(0) @db.Decimal(14, 2)
+  totalDeductions Decimal @default(0) @db.Decimal(14, 2)
+  totalNetPay     Decimal @default(0) @db.Decimal(14, 2)
+  employeeCount   Int     @default(0)
+  payslipCount    Int     @default(0)
+
+  // Workflow
+  createdById  String?   @db.Uuid
+  approvedById String?   @db.Uuid
+  approvedAt   DateTime?
+  releasedAt   DateTime?
+
+  // Metadata
+  remarks   String?  @db.Text
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  payPeriod        PayPeriod             @relation(fields: [payPeriodId], references: [id], onDelete: Cascade)
+  createdBy        User?                 @relation("PayrollCreator", fields: [createdById], references: [id])
+  approvedBy       User?                 @relation("PayrollApprover", fields: [approvedById], references: [id])
+  payslips         Payslip[]
+  lockedAttendance AttendanceDayRecord[] @relation("LockedAttendance")
+  bankFiles        BankFile[]
+  exportArtifacts  ExportArtifact[]
+
+  @@index([payPeriodId])
+  @@index([status])
+  @@map("payroll_runs")
+}
+
+/// Payslip is the individual employee payslip for a payroll run
+model Payslip {
+  id             String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  payrollRunId   String  @db.Uuid
+  employeeId     String  @db.Uuid
+  payslipNumber  String? @db.VarChar(50) // Auto-generated: EMP#-YYYY-MM-###
+
+  // Summary Totals
+  grossPay        Decimal @db.Decimal(12, 2)
+  totalEarnings   Decimal @db.Decimal(12, 2)
+  totalDeductions Decimal @db.Decimal(12, 2)
+  netPay          Decimal @db.Decimal(12, 2)
+
+  // Statutory Breakdowns (for quick reference)
+  sssEe          Decimal @default(0) @db.Decimal(10, 2)
+  sssEr          Decimal @default(0) @db.Decimal(10, 2)
+  philhealthEe   Decimal @default(0) @db.Decimal(10, 2)
+  philhealthEr   Decimal @default(0) @db.Decimal(10, 2)
+  pagibigEe      Decimal @default(0) @db.Decimal(10, 2)
+  pagibigEr      Decimal @default(0) @db.Decimal(10, 2)
+  withholdingTax Decimal @default(0) @db.Decimal(10, 2)
+
+  // YTD Totals (for tax computation)
+  ytdGrossPay      Decimal @default(0) @db.Decimal(14, 2)
+  ytdTaxableIncome Decimal @default(0) @db.Decimal(14, 2)
+  ytdTaxWithheld   Decimal @default(0) @db.Decimal(14, 2)
+
+  // Pay Profile Snapshot (for audit)
+  payProfileSnapshot Json // Snapshot of pay profile at computation time
+
+  // PDF Generation
+  pdfPath        String?   @db.VarChar(500)
+  pdfGeneratedAt DateTime?
+
+  // Metadata
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  payrollRun PayrollRun  @relation(fields: [payrollRunId], references: [id], onDelete: Cascade)
+  employee   Employee    @relation(fields: [employeeId], references: [id])
+  lines      PayslipLine[]
+
+  @@unique([payrollRunId, employeeId])
+  @@index([employeeId])
+  @@map("payslips")
+}
+
+/// PayslipLine is an individual line item on a payslip
+model PayslipLine {
+  id        String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  payslipId String @db.Uuid
+
+  // Line Item
+  category    PayslipLineCategory
+  description String              @db.VarChar(255)
+
+  // Computation
+  quantity   Decimal? @db.Decimal(10, 4) // e.g., hours, days
+  rate       Decimal? @db.Decimal(12, 4) // e.g., hourly rate
+  multiplier Decimal? @db.Decimal(4, 2) // e.g., 1.25 for OT
+  amount     Decimal  @db.Decimal(12, 2)
+
+  // Source Traceability
+  attendanceDayRecordId String? @db.Uuid
+  manualAdjustmentId    String? @db.Uuid
+
+  // Rule Traceability
+  ruleCode        String? @db.VarChar(50)
+  ruleDescription String? @db.VarChar(255)
+
+  // Metadata
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+
+  // Relations
+  payslip             Payslip               @relation(fields: [payslipId], references: [id], onDelete: Cascade)
+  attendanceDayRecord AttendanceDayRecord?  @relation("AttendanceSourceLines", fields: [attendanceDayRecordId], references: [id])
+  manualAdjustment    ManualAdjustmentLine? @relation(fields: [manualAdjustmentId], references: [id])
+
+  @@index([payslipId, category])
+  @@map("payslip_lines")
+}
+
+/// ManualAdjustmentLine for ad-hoc payroll adjustments
+model ManualAdjustmentLine {
+  id           String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  payrollRunId String              @db.Uuid
+  employeeId   String              @db.Uuid
+  category     PayslipLineCategory
+  description  String              @db.VarChar(255)
+  amount       Decimal             @db.Decimal(12, 2)
+  remarks      String?             @db.Text
+  createdById  String?             @db.Uuid
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
+
+  // Relations
+  payslipLines PayslipLine[]
+
+  @@index([payrollRunId, employeeId])
+  @@map("manual_adjustment_lines")
+}
+
+/// BankFile stores generated bank disbursement files
+model BankFile {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  payrollRunId String   @db.Uuid
+  bankCode     String   @db.VarChar(20)
+  fileName     String   @db.VarChar(255)
+  filePath     String   @db.VarChar(500)
+  fileFormat   String   @db.VarChar(50) // e.g., "METROBANK_FIXED"
+  recordCount  Int
+  totalAmount  Decimal  @db.Decimal(14, 2)
+  checksum     String?  @db.VarChar(64)
+  generatedAt  DateTime @default(now())
+
+  // Relations
+  payrollRun PayrollRun @relation(fields: [payrollRunId], references: [id], onDelete: Cascade)
+
+  @@index([payrollRunId])
+  @@map("bank_files")
+}
+
+// --- Export Artifact Type ---
+enum ExportType {
+  PAYROLL_REGISTER
+  BANK_DISBURSEMENT
+  SSS_CONTRIBUTIONS
+  PHILHEALTH_CONTRIBUTIONS
+  PAGIBIG_CONTRIBUTIONS
+  TAX_ALPHALIST
+  PAYSLIP_PDF
+  PAYSLIP_PDF_ZIP
+}
+
+/// ExportArtifact stores generated export files with immutable data snapshots
+/// Files can be stored in Vercel Blob or as base64 in DB for small files
+model ExportArtifact {
+  id           String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId    String     @db.Uuid
+  payrollRunId String     @db.Uuid
+  exportType   ExportType
+
+  // File Info
+  fileName      String @db.VarChar(255)
+  mimeType      String @db.VarChar(100)
+  fileSizeBytes Int
+
+  // Storage - use blobUrl for Vercel Blob, or fileContent for small DB storage
+  blobUrl     String? @db.VarChar(500) // Vercel Blob URL
+  fileContent Bytes? // For small files (<1MB), store in DB
+
+  // Data Snapshot (JSON of the data at export time for reproducibility)
+  dataSnapshot Json? // Stores source data hash or summary for verification
+
+  // Checksums for integrity
+  contentHash String   @db.VarChar(64) // SHA-256 of file content
+  recordCount Int      @default(0)
+  totalAmount Decimal? @db.Decimal(14, 2) // For financial exports
+
+  // Metadata
+  generatedById String    @db.Uuid
+  generatedAt   DateTime  @default(now())
+  expiresAt     DateTime? // Optional expiration for cleanup
+
+  // Relations
+  payrollRun  PayrollRun @relation(fields: [payrollRunId], references: [id], onDelete: Cascade)
+  generatedBy User       @relation("ExportGenerator", fields: [generatedById], references: [id])
+
+  @@index([payrollRunId, exportType])
+  @@index([companyId, generatedAt])
+  @@index([generatedById])
+  @@map("export_artifacts")
+}
+
+// ============================================================================
+// AUDIT LOG
+// ============================================================================
+
+/// AuditLog is an append-only log of all significant actions
+/// CRITICAL: This table is append-only. Never update or delete records.
+model AuditLog {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  // Who
+  userId    String? @db.Uuid
+  userEmail String? @db.VarChar(255) // Denormalized for retention
+  ipAddress String? @db.VarChar(45)
+  userAgent String? @db.VarChar(500)
+
+  // What
+  action     AuditAction
+  entityType String      @db.VarChar(50) // e.g., "Employee", "Payslip"
+  entityId   String?     @db.Uuid
+
+  // Changes
+  oldValues Json? // Previous state (for updates)
+  newValues Json? // New state (for creates/updates)
+
+  // Context
+  description String? @db.Text
+  metadata    Json? // Additional context
+
+  // Metadata (no updatedAt - immutable)
+  createdAt DateTime @default(now())
+
+  // Relations
+  user User? @relation("AuditLogUser", fields: [userId], references: [id])
+
+  @@index([entityType, entityId])
+  @@index([userId, createdAt])
+  @@index([action, createdAt])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+// ============================================================================
+// PERFORMANCE CHECK-INS
+// ============================================================================
+
+/// CheckInPeriod defines monthly/quarterly periods for performance check-ins
+model CheckInPeriod {
+  id         String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId  String      @db.Uuid
+  name       String      @db.VarChar(100) // e.g., "January 2025", "Q1 2025"
+  periodType CheckInType @default(MONTHLY)
+  startDate  DateTime    @db.Date
+  endDate    DateTime    @db.Date
+  dueDate    DateTime    @db.Date // When check-ins should be completed
+  isActive   Boolean     @default(true)
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+
+  // Relations
+  company  Company              @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  checkIns PerformanceCheckIn[]
+
+  @@unique([companyId, name])
+  @@index([companyId, startDate])
+  @@map("check_in_periods")
+}
+
+enum CheckInType {
+  MONTHLY
+  QUARTERLY
+  ANNUAL
+}
+
+/// PerformanceCheckIn tracks monthly performance reviews and goals
+model PerformanceCheckIn {
+  id         String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  periodId   String        @db.Uuid
+  employeeId String        @db.Uuid
+  reviewerId String?       @db.Uuid // Manager/reviewer
+  status     CheckInStatus @default(DRAFT)
+
+  // Overall Assessment
+  overallRating   Int? // 1-5 rating scale
+  overallComments String? @db.Text
+
+  // Self-Assessment Section
+  accomplishments String? @db.Text // What they accomplished
+  challenges      String? @db.Text // Challenges faced
+  learnings       String? @db.Text // What they learned
+  supportNeeded   String? @db.Text // Support needed from manager/company
+
+  // Manager Feedback
+  managerFeedback     String? @db.Text
+  strengths           String? @db.Text
+  areasForImprovement String? @db.Text
+
+  // Timestamps
+  submittedAt DateTime?
+  reviewedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  // Relations
+  period       CheckInPeriod @relation(fields: [periodId], references: [id], onDelete: Cascade)
+  employee     Employee      @relation("EmployeeCheckIns", fields: [employeeId], references: [id], onDelete: Cascade)
+  reviewer     User?         @relation("CheckInReviewer", fields: [reviewerId], references: [id])
+  goals        CheckInGoal[]
+  skillRatings SkillRating[]
+
+  @@unique([periodId, employeeId])
+  @@index([employeeId])
+  @@index([status])
+  @@map("performance_check_ins")
+}
+
+enum CheckInStatus {
+  DRAFT // Employee is filling it out
+  SUBMITTED // Employee submitted for review
+  UNDER_REVIEW // Manager is reviewing
+  COMPLETED // Review cycle complete
+  SKIPPED // Period skipped (e.g., new hire)
+}
+
+/// CheckInGoal tracks individual goals within a check-in
+model CheckInGoal {
+  id                String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  checkInId         String     @db.Uuid
+  goalType          GoalType   @default(PERFORMANCE)
+  title             String     @db.VarChar(255)
+  description       String?    @db.Text
+  targetDate        DateTime?  @db.Date
+  progress          Int        @default(0) // 0-100 percentage
+  status            GoalStatus @default(IN_PROGRESS)
+  selfAssessment    String?    @db.Text // Employee's assessment
+  managerAssessment String?    @db.Text // Manager's assessment
+  rating            Int? // 1-5 rating
+  carryForward      Boolean    @default(false) // Carry to next period
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
+
+  // Relations
+  checkIn PerformanceCheckIn @relation(fields: [checkInId], references: [id], onDelete: Cascade)
+
+  @@index([checkInId])
+  @@map("check_in_goals")
+}
+
+enum GoalType {
+  PERFORMANCE // Job performance goals
+  LEARNING // Learning & development goals
+  PROJECT // Project-specific goals
+  BEHAVIORAL // Behavioral/soft skill goals
+}
+
+enum GoalStatus {
+  NOT_STARTED
+  IN_PROGRESS
+  COMPLETED
+  PARTIALLY_MET
+  NOT_MET
+  DEFERRED
+}
+
+/// SkillRating tracks skill assessments within a check-in
+model SkillRating {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  checkInId       String   @db.Uuid
+  skillCategory   String   @db.VarChar(100) // e.g., "Technical", "Communication"
+  skillName       String   @db.VarChar(100) // e.g., "TypeScript", "Presentation"
+  selfRating      Int? // 1-5 self-assessment
+  managerRating   Int? // 1-5 manager assessment
+  comments        String?  @db.Text
+  developmentPlan String?  @db.Text // Plan to improve
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relations
+  checkIn PerformanceCheckIn @relation(fields: [checkInId], references: [id], onDelete: Cascade)
+
+  @@unique([checkInId, skillCategory, skillName])
+  @@index([checkInId])
+  @@map("skill_ratings")
+}
+
+// ============================================================================
+// SCHEMA NOTES
+// ============================================================================
+//
+// ## Important Modeling Decisions
+//
+// 1. **UUID Primary Keys**: All tables use UUIDs (gen_random_uuid()) for:
+//    - Better security (no sequential ID guessing)
+//    - Easier data merging in future multi-tenant scenarios
+//    - Client-side ID generation capability
+//
+// 2. **Soft Deletes**: Core entities (Employee, ShiftTemplate, etc.) use
+//    deletedAt for soft delete. Audit-critical tables (AuditLog)
+//    are append-only and never deleted.
+//
+// 3. **Immutability for Audit**:
+//    - AttendanceDayRecord: Locked when used by payroll
+//    - AuditLog: Append-only, never modified
+//    - Payslip: Once approved, corrections create adjustments in next period
+//
+// 4. **Source Traceability**: PayslipLine links to source records
+//    (AttendanceDayRecord) for audit.
+//
+// 5. **JSON for Flexible Data**:
+//    - EmploymentEvent.payload: Event-specific data
+//
+// 6. **Decimal for Money**: All monetary values use Decimal with appropriate
+//    precision (12,2 for amounts, 4,2 for rates, 5,4 for percentages).
+//
+// 7. **Timezone Handling**:
+//    - Timestamptz (@db.Timestamptz) for absolute moments (log times)
+//    - Date (@db.Date) for calendar dates (attendance_date, hire_date)
+//    - Time (@db.Time(0)) for shift times (no timezone needed)
+//
+// 8. **Indexes**: Strategic indexes for common queries:
+//    - employeeId + date for attendance lookups
+//    - payrollRunId for payslip aggregations
+//    - status fields for workflow queries
+//    - Composite indexes for filtered queries
+//
+// 9. **Company Scoping**: All major entities include companyId for future
+//     multi-tenant support, even though V1 is single-tenant.
+//
+// ## Migration Notes
+//
+// After schema changes, run:
+//   npx prisma migrate dev --name <migration_name>
+//
+// For production:
+//   npx prisma migrate deploy
+//
+// ============================================================================
