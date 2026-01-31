@@ -20,6 +20,11 @@ files:
   - dist-electron/**/*
   - package.json
   - .env
+  # Exclude build artifacts and unnecessary files
+  - "!.next/standalone/dist/**"
+  - "!.next/standalone/.next/cache/**"
+  - "!**/node_modules/.cache/**"
+  - "!**/*.map"
 
 # Extra resources (Prisma, etc.)
 extraResources:
