@@ -1,6 +1,8 @@
 {
   "name": "peopleos",
   "version": "0.1.0",
+  "description": "PeopleOS Payroll - A comprehensive payroll management system for Philippine businesses",
+  "author": "Christopher Lim <lim.christopher.go@gmail.com>",
   "private": true,
   "main": "dist-electron/main.js",
   "scripts": {

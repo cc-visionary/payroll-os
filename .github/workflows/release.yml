@@ -52,6 +52,8 @@ jobs:
       - name: Build and publish
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
         run: npm run electron:build -- --publish always --${{ matrix.platform }}
 
       - name: Upload artifacts

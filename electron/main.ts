@@ -13,7 +13,10 @@ import { spawn, ChildProcess } from "child_process";
 let mainWindow: BrowserWindow | null = null;
 let serverProcess: ChildProcess | null = null;
 const isDev = !app.isPackaged;
-const PORT = process.env.PORT || 3000;
+
+// Use a high port to avoid conflicts, bind to localhost only for security
+const PORT = isDev ? 3000 : 51847;
+const HOSTNAME = "127.0.0.1";
 
 // Configure auto-updater
 autoUpdater.autoDownload = false;
@@ -41,7 +44,7 @@ function createWindow() {
   });
 
   // Load the app
-  const url = `http://localhost:${PORT}`;
+  const url = isDev ? `http://localhost:${PORT}` : `http://${HOSTNAME}:${PORT}`;
   mainWindow.loadURL(url);
 
   // Open DevTools in development
@@ -75,6 +78,7 @@ async function startServer(): Promise<void> {
       env: {
         ...process.env,
         PORT: String(PORT),
+        HOSTNAME: HOSTNAME,
         NODE_ENV: "production",
       },
       cwd: path.join(app.getAppPath()),

@@ -17,8 +17,16 @@ const globalForPrisma = globalThis as unknown as {
 function createPrismaClient(): PrismaClient {
   const connectionString = process.env.DATABASE_URL;
 
-  if (!connectionString) {
+  // Skip validation during Next.js build phase
+  const isBuildTime = process.env.NEXT_PHASE === "phase-production-build";
+
+  if (!connectionString && !isBuildTime) {
     throw new Error("DATABASE_URL environment variable is required");
+  }
+
+  // Return a mock client during build time
+  if (!connectionString) {
+    return {} as PrismaClient;
   }
 
   // Neon-optimized pool configuration
@@ -57,11 +65,25 @@ function createPrismaClient(): PrismaClient {
   });
 }
 
-export const prisma = globalForPrisma.prisma ?? createPrismaClient();
-
-if (process.env.NODE_ENV !== "production") {
-  globalForPrisma.prisma = prisma;
+// Lazy initialization to avoid build-time errors
+function getPrismaClient(): PrismaClient {
+  if (!globalForPrisma.prisma) {
+    globalForPrisma.prisma = createPrismaClient();
+  }
+  return globalForPrisma.prisma;
 }
+
+// Export a proxy that lazily initializes prisma on first access
+export const prisma = new Proxy({} as PrismaClient, {
+  get(_target, prop) {
+    const client = getPrismaClient();
+    const value = client[prop as keyof PrismaClient];
+    if (typeof value === "function") {
+      return value.bind(client);
+    }
+    return value;
+  },
+});
 
 // Graceful shutdown helper for Electron app
 export async function disconnectDatabase(): Promise<void> {
