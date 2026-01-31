@@ -14,14 +14,20 @@ import { cookies } from "next/headers";
 import type { JWTPayload, RefreshTokenPayload, SessionUser, UserCompanyInfo } from "./types";
 import type { PermissionValue } from "./permissions";
 
-// Environment validation
-const JWT_SECRET = process.env.JWT_SECRET;
-if (!JWT_SECRET && process.env.NODE_ENV === "production") {
-  throw new Error("JWT_SECRET environment variable is required in production");
-}
+// Lazy secret initialization to avoid build-time errors
+let _secret: Uint8Array | null = null;
 
-// Use a default for development only
-const SECRET = new TextEncoder().encode(JWT_SECRET || "dev-secret-change-in-production");
+function getSecret(): Uint8Array {
+  if (_secret) return _secret;
+
+  const JWT_SECRET = process.env.JWT_SECRET;
+  if (!JWT_SECRET && process.env.NODE_ENV === "production") {
+    throw new Error("JWT_SECRET environment variable is required in production");
+  }
+
+  _secret = new TextEncoder().encode(JWT_SECRET || "dev-secret-change-in-production");
+  return _secret;
+}
 
 // Token expiration times
 const ACCESS_TOKEN_EXPIRY = "15m"; // 15 minutes
@@ -57,7 +63,7 @@ export async function createAccessToken(user: SessionUser): Promise<string> {
     .setIssuedAt(now)
     .setExpirationTime(ACCESS_TOKEN_EXPIRY)
     .setJti(generateJti())
-    .sign(SECRET);
+    .sign(getSecret());
 
   return token;
 }
@@ -74,7 +80,7 @@ export async function createRefreshToken(userId: string): Promise<string> {
     .setIssuedAt(now)
     .setExpirationTime(REFRESH_TOKEN_EXPIRY)
     .setJti(generateJti())
-    .sign(SECRET);
+    .sign(getSecret());
 
   return token;
 }
@@ -84,7 +90,7 @@ export async function createRefreshToken(userId: string): Promise<string> {
  */
 export async function verifyAccessToken(token: string): Promise<JWTPayload | null> {
   try {
-    const { payload } = await jwtVerify(token, SECRET);
+    const { payload } = await jwtVerify(token, getSecret());
 
     return {
       sub: payload.sub as string,
@@ -108,7 +114,7 @@ export async function verifyAccessToken(token: string): Promise<JWTPayload | nul
  */
 export async function verifyRefreshToken(token: string): Promise<RefreshTokenPayload | null> {
   try {
-    const { payload } = await jwtVerify(token, SECRET);
+    const { payload } = await jwtVerify(token, getSecret());
 
     return {
       sub: payload.sub as string,

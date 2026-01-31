@@ -40,7 +40,7 @@ win:
     - target: nsis
       arch:
         - x64
-  icon: resources/icon.ico
+  icon: resources/icons/people.png
   artifactName: ${productName}-Setup-${version}.${ext}
 
 nsis:
@@ -60,7 +60,7 @@ mac:
         - x64
         - arm64
   category: public.app-category.business
-  icon: resources/icon.icns
+  icon: resources/icons/people.png
   artifactName: ${productName}-${version}-${arch}.${ext}
 
 dmg:
@@ -81,7 +81,7 @@ linux:
       arch:
         - x64
   category: Office
-  icon: resources/icons
+  icon: resources/icons/people.png
   artifactName: ${productName}-${version}.${ext}
 
 # =============================================================================
