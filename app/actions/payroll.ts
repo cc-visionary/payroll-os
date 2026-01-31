@@ -462,6 +462,85 @@ export async function approvePayroll(payrollRunId: string) {
 }
 
 /**
+ * Unapprove a payroll run (revert from APPROVED back to REVIEW).
+ * Permission: payroll:approve
+ */
+export async function unapprovePayroll(payrollRunId: string) {
+  const auth = await assertPermission(Permission.PAYROLL_APPROVE);
+
+  const headersList = await headers();
+  const audit = createAuditLogger({
+    userId: auth.user.id,
+    userEmail: auth.user.email,
+    ipAddress: headersList.get("x-forwarded-for") ?? undefined,
+    userAgent: headersList.get("user-agent") ?? undefined,
+  });
+
+  const payrollRun = await prisma.payrollRun.findUnique({
+    where: { id: payrollRunId },
+    include: {
+      payPeriod: true,
+      _count: { select: { payslips: true } },
+    },
+  });
+
+  if (!payrollRun) {
+    return { success: false, error: "Payroll run not found" };
+  }
+
+  if (payrollRun.status !== "APPROVED") {
+    return {
+      success: false,
+      error: "Payroll must be in APPROVED status to revert to review",
+    };
+  }
+
+  try {
+    await prisma.$transaction(async (tx) => {
+      // Revert payroll run status to REVIEW
+      await tx.payrollRun.update({
+        where: { id: payrollRunId },
+        data: {
+          status: "REVIEW",
+          approvedById: null,
+          approvedAt: null,
+        },
+      });
+
+      // Unlock all attendance records that were locked by this payroll run
+      await tx.attendanceDayRecord.updateMany({
+        where: {
+          lockedByPayrollRunId: payrollRunId,
+        },
+        data: {
+          isLocked: false,
+          lockedByPayrollRunId: null,
+          lockedAt: null,
+        },
+      });
+    });
+
+    await audit.update(
+      "PayrollRun",
+      payrollRunId,
+      { status: "APPROVED" },
+      { status: "REVIEW", action: "unapprove", payPeriodCode: payrollRun.payPeriod.code }
+    );
+
+    revalidatePath(`/payroll/${payrollRunId}`);
+    revalidatePath("/payroll");
+
+    return {
+      success: true,
+      message: "Payroll reverted to review",
+    };
+  } catch (error) {
+    console.error("Failed to unapprove payroll:", error);
+    return { success: false, error: "Failed to revert payroll to review" };
+  }
+}
+
+/**
  * Release payroll (mark as disbursed).
  * Permission: payroll:release
  */
@@ -847,6 +926,7 @@ export interface PayrollRunDetail {
   remarks: string | null;
   canEdit: boolean;
   canApprove: boolean;
+  canUnapprove: boolean;
   canRelease: boolean;
   isCreator: boolean;  // True if current user created this payroll run
 }
@@ -930,6 +1010,11 @@ export async function getPayrollRunDetail(payrollRunId: string): Promise<{
       payrollRun.status === "APPROVED" &&
       auth.hasPermission(Permission.PAYROLL_RELEASE);
 
+    // Can unapprove if status is APPROVED (not yet released) and has approve permission
+    const canUnapprove =
+      payrollRun.status === "APPROVED" &&
+      auth.hasPermission(Permission.PAYROLL_APPROVE);
+
     return {
       success: true,
       detail: {
@@ -962,6 +1047,7 @@ export async function getPayrollRunDetail(payrollRunId: string): Promise<{
         remarks: payrollRun.remarks,
         canEdit,
         canApprove,
+        canUnapprove,
         canRelease,
         isCreator,
       },
@@ -2367,6 +2453,7 @@ export interface PayslipLineItem {
   amount: number;
   attendanceDate: Date | null;
   sortOrder: number;
+  manualAdjustmentId: string | null;
 }
 
 export interface PayslipAttendanceRecord {
@@ -2561,6 +2648,14 @@ export async function getPayslipDetail(
     // This catches holidays that might not be linked in the attendance record
     const startYear = payslip.payrollRun.payPeriod.startDate.getFullYear();
     const endYear = payslip.payrollRun.payPeriod.endDate.getFullYear();
+
+    // Normalize date range to avoid timezone issues:
+    // Calendar events are stored at noon UTC, pay period dates at midnight UTC
+    const holidayRangeStart = new Date(payslip.payrollRun.payPeriod.startDate);
+    holidayRangeStart.setUTCHours(0, 0, 0, 0);
+    const holidayRangeEnd = new Date(payslip.payrollRun.payPeriod.endDate);
+    holidayRangeEnd.setUTCHours(23, 59, 59, 999);
+
     const activeCalendar = await prisma.holidayCalendar.findFirst({
       where: {
         companyId: auth.user.companyId,
@@ -2571,8 +2666,8 @@ export async function getPayslipDetail(
         events: {
           where: {
             date: {
-              gte: payslip.payrollRun.payPeriod.startDate,
-              lte: payslip.payrollRun.payPeriod.endDate,
+              gte: holidayRangeStart,
+              lte: holidayRangeEnd,
             },
           },
         },
@@ -2642,6 +2737,7 @@ export async function getPayslipDetail(
         amount: Number(line.amount),
         attendanceDate: line.attendanceDayRecord?.attendanceDate || null,
         sortOrder: line.sortOrder,
+        manualAdjustmentId: line.manualAdjustmentId,
       }));
 
     const deductions = payslip.lines
@@ -2656,6 +2752,7 @@ export async function getPayslipDetail(
         amount: Math.abs(Number(line.amount)),
         attendanceDate: line.attendanceDayRecord?.attendanceDate || null,
         sortOrder: line.sortOrder,
+        manualAdjustmentId: line.manualAdjustmentId,
       }));
 
     // Format attendance records with schedule-bounded worked hours calculation
@@ -2936,10 +3033,11 @@ export async function getPayslipDetail(
     // This ensures adjustments appear in the breakdown even before payroll recomputation
     for (const adj of manualAdjustmentItems) {
       // Check if this adjustment already exists as a PayslipLine (via manualAdjustmentId)
+      // Compare against manualAdjustmentId field, NOT the PayslipLine.id
       const alreadyInLines =
         adj.type === "EARNING"
-          ? earnings.some((e) => e.id === adj.id)
-          : deductions.some((d) => d.id === adj.id);
+          ? earnings.some((e) => e.manualAdjustmentId === adj.id)
+          : deductions.some((d) => d.manualAdjustmentId === adj.id);
 
       if (!alreadyInLines) {
         const item = {
@@ -2952,6 +3050,7 @@ export async function getPayslipDetail(
           amount: adj.amount,
           attendanceDate: null,
           sortOrder: adj.type === "EARNING" ? 900 : 950,
+          manualAdjustmentId: adj.id,
         };
 
         if (adj.type === "EARNING") {

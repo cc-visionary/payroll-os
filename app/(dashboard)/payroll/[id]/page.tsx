@@ -8,6 +8,7 @@ import {
   getPayrollRunPayslips,
   getPayrollRunDiff,
   approvePayroll,
+  unapprovePayroll,
   releasePayroll,
   cancelPayrollRun,
   type PayrollRunDetail,
@@ -16,7 +17,11 @@ import {
 } from "@/app/actions/payroll";
 import { runPayrollComputation } from "@/app/actions/payroll-compute";
 import { generatePayslipPDFZipExport } from "@/app/actions/payroll-exports";
+import { ProgressLoader, type ProgressState } from "@/components/ui/progress-loader";
 import type { PayrollRunStatus } from "@/app/generated/prisma";
+
+// Action types for tracking pending state
+type PendingAction = "compute" | "approve" | "unapprove" | "release" | "cancel" | "export" | null;
 
 // Status badge colors
 const statusColors: Record<PayrollRunStatus, string> = {
@@ -189,7 +194,11 @@ export default function PayrollRunDetailPage({
   const [diff, setDiff] = useState<PayrollDiffSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [actionPending, setActionPending] = useState(false);
+  const [pendingAction, setPendingAction] = useState<PendingAction>(null);
+  const [progress, setProgress] = useState<ProgressState>({
+    isActive: false,
+    title: "",
+  });
 
   // Tab state
   const [activeTab, setActiveTab] = useState<"summary" | "payslips" | "comparison">(
@@ -281,24 +290,53 @@ export default function PayrollRunDetailPage({
   }, [detail?.status, id]);
 
   const handleCompute = async () => {
-    setActionPending(true);
+    setPendingAction("compute");
+    setError(null);
+    setProgress({
+      isActive: true,
+      title: "Computing Payroll",
+      message: "Processing payslips...",
+    });
+
     const result = await runPayrollComputation(id);
+
     if (result.success) {
-      // Reload detail
-      const detailResult = await getPayrollRunDetail(id);
+      setProgress((prev) => ({ ...prev, message: "Reloading data..." }));
+      // Reload detail, payslips, and diff after computation
+      const [detailResult, payslipsResult, diffResult] = await Promise.all([
+        getPayrollRunDetail(id),
+        getPayrollRunPayslips(id),
+        getPayrollRunDiff(id),
+      ]);
       if (detailResult.success && detailResult.detail) {
         setDetail(detailResult.detail);
+      }
+      if (payslipsResult.success && payslipsResult.payslips) {
+        setPayslips(payslipsResult.payslips);
+      }
+      if (diffResult.success && diffResult.diff) {
+        setDiff(diffResult.diff);
       }
     } else {
       setError(result.error || "Failed to compute payroll");
     }
-    setActionPending(false);
+
+    setProgress((prev) => ({ ...prev, isActive: false }));
+    setPendingAction(null);
   };
 
   const handleApprove = async () => {
-    setActionPending(true);
+    setPendingAction("approve");
+    setError(null);
+    setProgress({
+      isActive: true,
+      title: "Approving Payroll",
+      message: "Locking attendance records and generating payslips...",
+    });
+
     const result = await approvePayroll(id);
     if (result.success) {
+      setProgress((prev) => ({ ...prev, message: "Reloading data..." }));
       const detailResult = await getPayrollRunDetail(id);
       if (detailResult.success && detailResult.detail) {
         setDetail(detailResult.detail);
@@ -307,13 +345,47 @@ export default function PayrollRunDetailPage({
     } else {
       setError(result.error || "Failed to approve payroll");
     }
-    setActionPending(false);
+
+    setProgress((prev) => ({ ...prev, isActive: false }));
+    setPendingAction(null);
+  };
+
+  const handleUnapprove = async () => {
+    setPendingAction("unapprove");
+    setError(null);
+    setProgress({
+      isActive: true,
+      title: "Reverting to Review",
+      message: "Unlocking attendance records...",
+    });
+
+    const result = await unapprovePayroll(id);
+    if (result.success) {
+      setProgress((prev) => ({ ...prev, message: "Reloading data..." }));
+      const detailResult = await getPayrollRunDetail(id);
+      if (detailResult.success && detailResult.detail) {
+        setDetail(detailResult.detail);
+      }
+    } else {
+      setError(result.error || "Failed to revert to review");
+    }
+
+    setProgress((prev) => ({ ...prev, isActive: false }));
+    setPendingAction(null);
   };
 
   const handleRelease = async () => {
-    setActionPending(true);
+    setPendingAction("release");
+    setError(null);
+    setProgress({
+      isActive: true,
+      title: "Releasing Payroll",
+      message: "Finalizing payroll run...",
+    });
+
     const result = await releasePayroll(id);
     if (result.success) {
+      setProgress((prev) => ({ ...prev, message: "Reloading data..." }));
       const detailResult = await getPayrollRunDetail(id);
       if (detailResult.success && detailResult.detail) {
         setDetail(detailResult.detail);
@@ -322,31 +394,72 @@ export default function PayrollRunDetailPage({
     } else {
       setError(result.error || "Failed to release payroll");
     }
-    setActionPending(false);
+
+    setProgress((prev) => ({ ...prev, isActive: false }));
+    setPendingAction(null);
   };
 
   const handleCancel = async () => {
-    setActionPending(true);
+    setPendingAction("cancel");
+    setError(null);
+    setProgress({
+      isActive: true,
+      title: "Cancelling Payroll",
+      message: "Removing payroll run...",
+    });
+
     const result = await cancelPayrollRun(id, cancelReason);
     if (result.success) {
       router.push("/payroll");
     } else {
       setError(result.error || "Failed to cancel payroll run");
     }
-    setActionPending(false);
+
+    setProgress((prev) => ({ ...prev, isActive: false }));
+    setPendingAction(null);
   };
 
   const handleExportPayslips = async () => {
-    setActionPending(true);
+    setPendingAction("export");
     setError(null);
+    setProgress({
+      isActive: true,
+      title: "Exporting Payslips",
+      message: "Generating PDF files...",
+    });
+
     const result = await generatePayslipPDFZipExport(id);
-    if (result.success && result.downloadUrl) {
-      // Trigger download
-      window.open(result.downloadUrl, "_blank");
+    if (result.success && result.downloadUrl && result.fileName) {
+      try {
+        setProgress((prev) => ({ ...prev, message: "Preparing download..." }));
+        // Convert base64 data URL to blob for proper download (works in Electron)
+        const base64Data = result.downloadUrl.split(",")[1];
+        const binaryString = atob(base64Data);
+        const bytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) {
+          bytes[i] = binaryString.charCodeAt(i);
+        }
+        const blob = new Blob([bytes], { type: "application/zip" });
+
+        // Create download link and trigger click
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = result.fileName;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+      } catch (downloadError) {
+        console.error("Download error:", downloadError);
+        setError("Failed to download file");
+      }
     } else {
       setError(result.error || "Failed to export payslips");
     }
-    setActionPending(false);
+
+    setProgress((prev) => ({ ...prev, isActive: false }));
+    setPendingAction(null);
   };
 
   if (loading) {
@@ -421,6 +534,9 @@ export default function PayrollRunDetailPage({
         </div>
       )}
 
+      {/* Universal Progress Loader */}
+      <ProgressLoader state={progress} />
+
       {/* Status Timeline */}
       <PayrollStatusTimeline
         status={detail.status}
@@ -434,17 +550,17 @@ export default function PayrollRunDetailPage({
         {detail.status === "DRAFT" && (
           <button
             onClick={handleCompute}
-            disabled={actionPending}
+            disabled={pendingAction !== null}
             className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors"
           >
-            {actionPending ? "Computing..." : "Compute Payroll"}
+            Compute Payroll
           </button>
         )}
         {detail.status === "REVIEW" && (
           <>
             <button
               onClick={handleCompute}
-              disabled={actionPending}
+              disabled={pendingAction !== null}
               className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 disabled:opacity-50 transition-colors"
             >
               Recompute
@@ -452,7 +568,7 @@ export default function PayrollRunDetailPage({
             {detail.canApprove ? (
               <button
                 onClick={() => handleApproveDialogChange(true)}
-                disabled={actionPending}
+                disabled={pendingAction !== null}
                 className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 transition-colors"
               >
                 Approve
@@ -464,19 +580,32 @@ export default function PayrollRunDetailPage({
             ) : null}
           </>
         )}
-        {detail.status === "APPROVED" && detail.canRelease && (
-          <button
-            onClick={() => setShowReleaseDialog(true)}
-            disabled={actionPending}
-            className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50 transition-colors"
-          >
-            Release
-          </button>
+        {detail.status === "APPROVED" && (
+          <>
+            {detail.canUnapprove && (
+              <button
+                onClick={handleUnapprove}
+                disabled={pendingAction !== null}
+                className="px-4 py-2 border border-amber-300 text-amber-700 rounded-lg hover:bg-amber-50 disabled:opacity-50 transition-colors"
+              >
+                Revert to Review
+              </button>
+            )}
+            {detail.canRelease && (
+              <button
+                onClick={() => setShowReleaseDialog(true)}
+                disabled={pendingAction !== null}
+                className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50 transition-colors"
+              >
+                Release
+              </button>
+            )}
+          </>
         )}
         {["DRAFT", "REVIEW"].includes(detail.status) && (
           <button
             onClick={() => setShowCancelDialog(true)}
-            disabled={actionPending}
+            disabled={pendingAction !== null}
             className="px-4 py-2 border border-red-300 text-red-700 rounded-lg hover:bg-red-50 disabled:opacity-50 transition-colors"
           >
             Cancel Run
@@ -485,13 +614,13 @@ export default function PayrollRunDetailPage({
         {["APPROVED", "RELEASED"].includes(detail.status) && (
           <button
             onClick={handleExportPayslips}
-            disabled={actionPending}
+            disabled={pendingAction !== null}
             className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 disabled:opacity-50 transition-colors flex items-center gap-2"
           >
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
             </svg>
-            {actionPending ? "Exporting..." : "Export Payslips"}
+            Export Payslips
           </button>
         )}
       </div>
@@ -935,10 +1064,10 @@ export default function PayrollRunDetailPage({
               </button>
               <button
                 onClick={handleApprove}
-                disabled={actionPending || !allChecklistItemsChecked}
+                disabled={pendingAction !== null || !allChecklistItemsChecked}
                 className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
               >
-                {actionPending ? "Approving..." : "Approve"}
+                Approve
               </button>
             </div>
 
@@ -971,10 +1100,10 @@ export default function PayrollRunDetailPage({
               </button>
               <button
                 onClick={handleRelease}
-                disabled={actionPending}
+                disabled={pendingAction !== null}
                 className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50 transition-colors"
               >
-                {actionPending ? "Releasing..." : "Release"}
+                Release
               </button>
             </div>
           </div>
@@ -1016,10 +1145,10 @@ export default function PayrollRunDetailPage({
               </button>
               <button
                 onClick={handleCancel}
-                disabled={actionPending}
+                disabled={pendingAction !== null}
                 className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 transition-colors"
               >
-                {actionPending ? "Cancelling..." : "Cancel Run"}
+                Cancel Run
               </button>
             </div>
           </div>

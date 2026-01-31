@@ -38,6 +38,36 @@ jobs:
       - name: Generate Prisma client
         run: npx prisma generate
 
+      - name: Download Node.js runtime for bundling
+        shell: pwsh
+        run: |
+          # Download Node.js for Windows to bundle with the app
+          $nodeVersion = "20.11.1"
+          $nodeUrl = "https://nodejs.org/dist/v$nodeVersion/node-v$nodeVersion-win-x64.zip"
+          $downloadPath = "node-runtime.zip"
+          $extractPath = "node-runtime-temp"
+          $targetPath = "node-runtime"
+
+          Write-Host "Downloading Node.js v$nodeVersion..."
+          Invoke-WebRequest -Uri $nodeUrl -OutFile $downloadPath
+
+          Write-Host "Extracting..."
+          Expand-Archive -Path $downloadPath -DestinationPath $extractPath -Force
+
+          # Create target directory with just the essential files
+          New-Item -ItemType Directory -Path $targetPath -Force | Out-Null
+
+          # Copy only the essential files (node.exe and required DLLs)
+          $sourceDir = "$extractPath/node-v$nodeVersion-win-x64"
+          Copy-Item "$sourceDir/node.exe" "$targetPath/"
+
+          # Clean up
+          Remove-Item $downloadPath -Force
+          Remove-Item $extractPath -Recurse -Force
+
+          Write-Host "Node.js runtime prepared at $targetPath"
+          Get-ChildItem $targetPath
+
       - name: Build and publish
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}

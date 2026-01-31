@@ -427,11 +427,29 @@ export function calculateAttendanceTimes(
       undertimeMinutes = Math.max(0, undertimeMinutes - breakAdjustmentMinutes);
     }
     result.undertimeMinutes = undertimeMinutes;
-  } else if (clockOut > schedEnd && lateOutApproved) {
-    // Late Out OT (only if approved)
-    result.otLateOutMinutes = Math.round(
-      (clockOut.getTime() - schedEnd.getTime()) / (1000 * 60)
-    );
+  } else if (clockOut >= schedEnd) {
+    // Late Out OT calculation has two components:
+    // 1. Time past schedule end (requires lateOutApproved)
+    // 2. Worked break time (counts automatically when break is reduced)
+    let otMinutes = 0;
+
+    // Component 1: Time past schedule end (requires approval)
+    if (clockOut > schedEnd && lateOutApproved) {
+      otMinutes += Math.round(
+        (clockOut.getTime() - schedEnd.getTime()) / (1000 * 60)
+      );
+    }
+
+    // Component 2: Worked break time (automatic - no approval needed)
+    // If break was reduced/removed, the employee worked through their break
+    // This is OT regardless of lateOutApproved flag because it's not "staying late"
+    // e.g., 9AM-6PM schedule with 60min break = 8hr expected, but if break=0
+    // and employee clocks out at 6PM, they worked 9hr = 1hr OT from break
+    if (breakAdjustmentMinutes > 0) {
+      otMinutes += breakAdjustmentMinutes;
+    }
+
+    result.otLateOutMinutes = otMinutes;
   }
 
   return result;

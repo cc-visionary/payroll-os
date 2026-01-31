@@ -63,6 +63,30 @@ function createWindow() {
   });
 }
 
+/**
+ * Get the path to the Node.js executable.
+ * In production, uses the bundled Node.js from extraResources.
+ * In development, uses the system Node.js.
+ */
+function getNodePath(): string {
+  if (isDev) {
+    return "node"; // Use system node in dev
+  }
+
+  // In production, use bundled Node.js
+  const resourcesPath = process.resourcesPath;
+  const platform = process.platform;
+
+  if (platform === "win32") {
+    return path.join(resourcesPath, "node-runtime", "node.exe");
+  } else if (platform === "darwin") {
+    return path.join(resourcesPath, "node-runtime", "bin", "node");
+  } else {
+    // Linux
+    return path.join(resourcesPath, "node-runtime", "bin", "node");
+  }
+}
+
 async function startServer(): Promise<void> {
   return new Promise((resolve, reject) => {
     if (isDev) {
@@ -73,8 +97,12 @@ async function startServer(): Promise<void> {
 
     // In production, start the Next.js standalone server
     const serverPath = path.join(app.getAppPath(), ".next", "standalone", "server.js");
+    const nodePath = getNodePath();
 
-    serverProcess = spawn("node", [serverPath], {
+    console.log(`Starting server with Node.js: ${nodePath}`);
+    console.log(`Server script: ${serverPath}`);
+
+    serverProcess = spawn(nodePath, [serverPath], {
       env: {
         ...process.env,
         PORT: String(PORT),
@@ -95,7 +123,10 @@ async function startServer(): Promise<void> {
       console.error(`Server Error: ${data}`);
     });
 
-    serverProcess.on("error", reject);
+    serverProcess.on("error", (error) => {
+      console.error(`Failed to start server: ${error.message}`);
+      reject(error);
+    });
 
     // Fallback resolve after timeout
     setTimeout(resolve, 5000);

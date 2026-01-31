@@ -1750,10 +1750,16 @@ export async function generatePayslipPDFZipExport(payrollRunId: string): Promise
       }
 
       // Get holidays from calendar for the period
+      // Normalize date range to avoid timezone issues (calendar events stored at noon UTC)
+      const holidayRangeStart = new Date(periodStartDate);
+      holidayRangeStart.setUTCHours(0, 0, 0, 0);
+      const holidayRangeEnd = new Date(periodEndDate);
+      holidayRangeEnd.setUTCHours(23, 59, 59, 999);
+
       const calendarHolidays = await prisma.calendarEvent.findMany({
         where: {
           calendar: { companyId: auth.user.companyId, isActive: true },
-          date: { gte: periodStartDate, lte: periodEndDate },
+          date: { gte: holidayRangeStart, lte: holidayRangeEnd },
         },
         select: { date: true, name: true, dayType: true },
       });

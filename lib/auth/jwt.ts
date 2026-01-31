@@ -142,12 +142,13 @@ export async function setAuthCookies(accessToken: string, refreshToken: string):
     maxAge: 15 * 60, // 15 minutes
   });
 
-  // Refresh token - longer expiry, httpOnly, secure, stricter path
+  // Refresh token - longer expiry, httpOnly, secure
+  // Path set to "/" so middleware can check if refresh is possible
   cookieStore.set(REFRESH_TOKEN_COOKIE, refreshToken, {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
     sameSite: "lax",
-    path: "/api/auth", // Only sent to auth endpoints
+    path: "/",
     maxAge: 7 * 24 * 60 * 60, // 7 days
   });
 }

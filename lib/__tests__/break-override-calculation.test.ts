@@ -415,7 +415,12 @@ describe("Break Override - OT Calculations", () => {
   });
 
   describe("Late Out OT with break override", () => {
-    test("Late clock out approved should count as OT regardless of break override", () => {
+    test("Late clock out approved with no break = OT for late out + worked break time", () => {
+      // Schedule: 9AM-6PM with 60 min break = 8 hours expected work
+      // Employee clocks out at 7PM (1 hour past schedule) with no break taken
+      // Total work: 10 hours, Expected: 8 hours, OT = 2 hours (120 min)
+      // - 60 min from late clock out (7PM - 6PM)
+      // - 60 min from working through break
       const result = calculateAttendanceTimes(
         manilaTime("2026-01-26", 9, 0),   // Clock in 9:00 AM
         manilaTime("2026-01-26", 19, 0),  // Clock out 7:00 PM (1 hour late)
@@ -428,7 +433,92 @@ describe("Break Override - OT Calculations", () => {
         0      // breakMinutesApplied (no break)
       );
 
+      expect(result.otLateOutMinutes).toBe(120); // 60 late out + 60 break worked
+      expect(result.undertimeMinutes).toBe(0);
+    });
+
+    test("Late clock out approved with normal break = only late out OT", () => {
+      // Schedule: 9AM-6PM with 60 min break = 8 hours expected work
+      // Employee clocks out at 7PM (1 hour past schedule) with normal break
+      // Total work: 9 hours, Expected: 8 hours, OT = 1 hour (60 min)
+      const result = calculateAttendanceTimes(
+        manilaTime("2026-01-26", 9, 0),   // Clock in 9:00 AM
+        manilaTime("2026-01-26", 19, 0),  // Clock out 7:00 PM (1 hour late)
+        scheduleTime(9, 0),
+        scheduleTime(18, 0),
+        new Date("2026-01-26"),
+        false, // earlyInApproved
+        true,  // lateOutApproved
+        60,    // shiftBreakMinutes
+        60     // breakMinutesApplied (normal break)
+      );
+
+      expect(result.otLateOutMinutes).toBe(60); // Only 60 min late out
+      expect(result.undertimeMinutes).toBe(0);
+    });
+
+    test("Clock out at schedule end with no break = OT for worked break time (no approval needed)", () => {
+      // Schedule: 9AM-6PM with 60 min break = 8 hours expected work
+      // Employee clocks out at 6PM (on time) but with no break taken
+      // Total work: 9 hours, Expected: 8 hours, OT = 1 hour (60 min)
+      // NOTE: lateOutApproved is FALSE but break OT should still count
+      // because working through break is automatic OT, not "staying late"
+      const result = calculateAttendanceTimes(
+        manilaTime("2026-01-26", 9, 0),   // Clock in 9:00 AM
+        manilaTime("2026-01-26", 18, 0),  // Clock out 6:00 PM (on time)
+        scheduleTime(9, 0),
+        scheduleTime(18, 0),
+        new Date("2026-01-26"),
+        false, // earlyInApproved
+        false, // lateOutApproved - NOT approved, but break OT should still count
+        60,    // shiftBreakMinutes
+        0      // breakMinutesApplied (no break)
+      );
+
+      expect(result.otLateOutMinutes).toBe(60); // 60 min from working through break
+      expect(result.undertimeMinutes).toBe(0);
+    });
+
+    test("Late clock out NOT approved with no break = only break OT counts", () => {
+      // Schedule: 9AM-6PM with 60 min break = 8 hours expected work
+      // Employee clocks out at 7PM (1 hour past schedule) with no break
+      // lateOutApproved = false, so the 1 hour past schedule doesn't count
+      // But the 1 hour from working through break DOES count
+      const result = calculateAttendanceTimes(
+        manilaTime("2026-01-26", 9, 0),   // Clock in 9:00 AM
+        manilaTime("2026-01-26", 19, 0),  // Clock out 7:00 PM (1 hour late)
+        scheduleTime(9, 0),
+        scheduleTime(18, 0),
+        new Date("2026-01-26"),
+        false, // earlyInApproved
+        false, // lateOutApproved - NOT approved
+        60,    // shiftBreakMinutes
+        0      // breakMinutesApplied (no break)
+      );
+
+      // Only 60 min from break (not the 60 min past schedule end)
       expect(result.otLateOutMinutes).toBe(60);
+      expect(result.undertimeMinutes).toBe(0);
+    });
+
+    test("Late clock out NOT approved with normal break = no OT", () => {
+      // Schedule: 9AM-6PM with 60 min break = 8 hours expected work
+      // Employee clocks out at 7PM (1 hour past schedule) with normal break
+      // lateOutApproved = false, so no OT
+      const result = calculateAttendanceTimes(
+        manilaTime("2026-01-26", 9, 0),   // Clock in 9:00 AM
+        manilaTime("2026-01-26", 19, 0),  // Clock out 7:00 PM (1 hour late)
+        scheduleTime(9, 0),
+        scheduleTime(18, 0),
+        new Date("2026-01-26"),
+        false, // earlyInApproved
+        false, // lateOutApproved - NOT approved
+        60,    // shiftBreakMinutes
+        60     // breakMinutesApplied (normal break)
+      );
+
+      // No OT because lateOutApproved is false and no break adjustment
+      expect(result.otLateOutMinutes).toBe(0);
       expect(result.undertimeMinutes).toBe(0);
     });
   });

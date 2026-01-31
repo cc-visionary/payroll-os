@@ -23,6 +23,7 @@
 # electron
 /dist
 /dist-electron
+/node-runtime
 
 # misc
 .DS_Store

@@ -29,8 +29,9 @@ const STATIC_PATTERNS = [
   /^\/.*\.(png|jpg|jpeg|gif|svg|ico|css|js|woff|woff2)$/,
 ];
 
-// Cookie name (must match jwt.ts)
+// Cookie names (must match jwt.ts)
 const ACCESS_TOKEN_COOKIE = "payrollos_access_token";
+const REFRESH_TOKEN_COOKIE = "payrollos_refresh_token";
 
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
@@ -45,20 +46,31 @@ export async function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
-  // Get access token from cookie
+  // Get tokens from cookies
   const accessToken = request.cookies.get(ACCESS_TOKEN_COOKIE)?.value;
+  const refreshToken = request.cookies.get(REFRESH_TOKEN_COOKIE)?.value;
 
   if (!accessToken) {
-    // No token - redirect to login
+    // No access token - check if refresh token exists
+    if (refreshToken) {
+      // Refresh token exists - let request through so server-side refresh can happen
+      return NextResponse.next();
+    }
+    // No tokens at all - redirect to login
     return redirectToLogin(request);
   }
 
-  // Verify token at the edge (basic validation only)
+  // Verify access token at the edge (basic validation only)
   const isValid = await verifyTokenAtEdge(accessToken);
 
   if (!isValid) {
-    // Token invalid/expired - redirect to login
-    // The client should have tried refresh first, so this is a hard failure
+    // Access token expired/invalid - check if refresh is possible
+    if (refreshToken) {
+      // Refresh token exists - let request through so server-side refresh can happen
+      // The getSession() call in the page will trigger tryRefreshSession()
+      return NextResponse.next();
+    }
+    // No refresh token - redirect to login
     return redirectToLogin(request);
   }
 

@@ -34,18 +34,6 @@ const TEST_USERS = [
     roles: ["FINANCE_MANAGER"],
     description: "Finance Manager - Approve payroll, view reports",
   },
-  {
-    email: "manager@gamecove.ph",
-    password: "Manager123!",
-    roles: ["MANAGER"],
-    description: "Team Lead - Approve team leaves, view team attendance",
-  },
-  {
-    email: "employee@gamecove.ph",
-    password: "Employee123!",
-    roles: ["EMPLOYEE"],
-    description: "Employee - Self-service only",
-  },
 ];
 
 export interface CreatedUser {

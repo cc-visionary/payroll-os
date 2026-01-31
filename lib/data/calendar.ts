@@ -92,10 +92,17 @@ export const getCalendarEventsForRange = cache(
 
     const calendarIds = calendars.map((c) => c.id);
 
+    // Normalize date range to avoid timezone issues:
+    // Calendar events are stored at noon UTC, other dates may be at midnight UTC
+    const normalizedStart = new Date(startDate);
+    normalizedStart.setUTCHours(0, 0, 0, 0);
+    const normalizedEnd = new Date(endDate);
+    normalizedEnd.setUTCHours(23, 59, 59, 999);
+
     const events = await prisma.calendarEvent.findMany({
       where: {
         calendarId: { in: calendarIds },
-        date: { gte: startDate, lte: endDate },
+        date: { gte: normalizedStart, lte: normalizedEnd },
       },
       orderBy: { date: "asc" },
     });

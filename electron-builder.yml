@@ -43,13 +43,19 @@ files:
   - "!**/node_modules/.cache/**"
   - "!**/*.map"
 
-# Extra resources (Prisma, etc.)
+# Extra resources (Prisma, Node.js runtime, etc.)
 extraResources:
   - from: prisma
     to: prisma
     filter:
       - "schema.prisma"
       - "migrations/**/*"
+  # Node.js runtime for running the Next.js server
+  # Downloaded during build process
+  - from: node-runtime
+    to: node-runtime
+    filter:
+      - "**/*"
 
 # Use asar for packaging (security)
 asar: true
