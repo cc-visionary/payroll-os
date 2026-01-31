@@ -220,30 +220,7 @@ export const RolePermissions: Record<string, PermissionValue[]> = {
     Permission.AUDIT_VIEW,
   ],
 
-  // Team Lead / Manager - approves team leaves, views team attendance
-  MANAGER: [
-    Permission.EMPLOYEE_VIEW,
-    Permission.ATTENDANCE_VIEW,
-    Permission.ATTENDANCE_APPROVE_ADJUSTMENT,
-    Permission.LEAVE_VIEW,
-    Permission.LEAVE_APPROVE,
-    Permission.PAYSLIP_VIEW_OWN,
-    Permission.SCHEDULE_VIEW,
-    Permission.REIMBURSEMENT_VIEW,
-    Permission.REIMBURSEMENT_APPROVE,
-  ],
-
-  // Regular Employee - self-service only
-  EMPLOYEE: [
-    Permission.ATTENDANCE_VIEW, // Own attendance only (enforced at query level)
-    Permission.LEAVE_VIEW,
-    Permission.LEAVE_REQUEST,
-    Permission.PAYSLIP_VIEW_OWN,
-    Permission.REIMBURSEMENT_REQUEST,
-    Permission.CASH_ADVANCE_REQUEST,
-    Permission.OR_INCENTIVE_SUBMIT,
-    Permission.SCHEDULE_VIEW, // Own schedule only
-  ],
+  // Note: MANAGER and EMPLOYEE roles removed - this is an admin-only desktop app
 };
 
 /**

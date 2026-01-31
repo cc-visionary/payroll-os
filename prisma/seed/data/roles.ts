@@ -1,7 +1,8 @@
 // =============================================================================
 // PeopleOS PH - Role Definitions
 // =============================================================================
-// Import the canonical role permissions from the auth module
+// Admin-only roles for the desktop payroll application.
+// Employee self-service and manager roles removed (not needed for this use case).
 
 import { RolePermissions } from "../../../lib/auth/permissions";
 
@@ -28,18 +29,6 @@ export const roles = [
     code: "FINANCE_MANAGER",
     name: "Finance Manager",
     permissions: RolePermissions.FINANCE_MANAGER,
-    isSystem: true,
-  },
-  {
-    code: "MANAGER",
-    name: "Manager",
-    permissions: RolePermissions.MANAGER,
-    isSystem: true,
-  },
-  {
-    code: "EMPLOYEE",
-    name: "Employee",
-    permissions: RolePermissions.EMPLOYEE,
     isSystem: true,
   },
 ];

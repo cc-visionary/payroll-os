@@ -1,0 +1,95 @@
+# =============================================================================
+# PeopleOS PH - Electron Builder Configuration
+# =============================================================================
+# Configuration for building desktop installers for Windows, macOS, and Linux.
+# =============================================================================
+
+appId: com.peopleos.payroll
+productName: PeopleOS Payroll
+copyright: Copyright © 2026 PeopleOS
+
+directories:
+  output: dist
+  buildResources: resources
+
+# Files to include in the build
+files:
+  - .next/standalone/**/*
+  - .next/static/**/*
+  - public/**/*
+  - dist-electron/**/*
+  - package.json
+  - .env
+
+# Extra resources (Prisma, etc.)
+extraResources:
+  - from: prisma
+    to: prisma
+    filter:
+      - "schema.prisma"
+      - "migrations/**/*"
+
+# Use asar for packaging (security)
+asar: true
+
+# =============================================================================
+# Windows Configuration
+# =============================================================================
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  icon: resources/icon.ico
+  artifactName: ${productName}-Setup-${version}.${ext}
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: PeopleOS Payroll
+
+# =============================================================================
+# macOS Configuration
+# =============================================================================
+mac:
+  target:
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+  category: public.app-category.business
+  icon: resources/icon.icns
+  artifactName: ${productName}-${version}-${arch}.${ext}
+
+dmg:
+  contents:
+    - x: 130
+      y: 220
+    - x: 410
+      y: 220
+      type: link
+      path: /Applications
+
+# =============================================================================
+# Linux Configuration
+# =============================================================================
+linux:
+  target:
+    - target: AppImage
+      arch:
+        - x64
+  category: Office
+  icon: resources/icons
+  artifactName: ${productName}-${version}.${ext}
+
+# =============================================================================
+# Auto-updater Configuration
+# =============================================================================
+# Configure for GitHub releases
+publish:
+  provider: github
+  owner: cc-visionary
+  repo: payroll-os
+  releaseType: release

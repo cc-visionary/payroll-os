@@ -29,6 +29,11 @@ const settingsNavItems = [
     label: "Company Info",
     description: "Company details and branding",
   },
+  {
+    href: "/settings/about",
+    label: "About",
+    description: "Version and updates",
+  },
 ];
 
 export default function SettingsLayout({

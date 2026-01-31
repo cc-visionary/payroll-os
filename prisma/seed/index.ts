@@ -1,26 +1,33 @@
 // =============================================================================
 // PeopleOS PH - Database Seed Entry Point
 // =============================================================================
+// Seeds essential data for the payroll system:
+// - Company and hiring entities
+// - Admin roles (Super Admin, HR Admin, Payroll Admin, Finance Manager)
+// - Default admin user
+// - Shift templates, holidays, payroll calendar
+// - Leave types and departments
+// =============================================================================
 
 import { PrismaClient } from "../../app/generated/prisma";
 import { PrismaPg } from "@prisma/adapter-pg";
-import { Pool } from "pg";
+import { Pool, PoolConfig } from "pg";
 
 import { seedCompany } from "./seeders/01-company";
 import { seedRoles } from "./seeders/02-roles";
 import { seedAdminUser, type CreatedUser } from "./seeders/03-admin-user";
 import { seedShiftTemplates } from "./seeders/04-shifts";
 import { seedHolidayCalendar } from "./seeders/05-holidays";
-import { seedStatutoryTables } from "./seeders/07-statutory";
 import { seedPayrollCalendar } from "./seeders/08-payroll-calendar";
-import { seedSampleEmployees } from "./seeders/09-sample-employees";
 import { seedLeaveTypes } from "./seeders/10-leave-types";
 import { seedDepartments } from "./seeders/11-departments";
 
-// Create Prisma client with adapter for Prisma 7
-const pool = new Pool({
+// Create Prisma client with adapter for Prisma 7 (Neon-compatible)
+const poolConfig: PoolConfig = {
   connectionString: process.env.DATABASE_URL,
-});
+  ssl: { rejectUnauthorized: true }, // Required for Neon
+};
+const pool = new Pool(poolConfig);
 const adapter = new PrismaPg(pool);
 const prisma = new PrismaClient({ adapter });
 
@@ -44,9 +51,6 @@ async function main() {
   await seedHolidayCalendar(prisma, company.id);
   console.log("✅ Holiday calendar seeded");
 
-  await seedStatutoryTables();
-  console.log("✅ Statutory tables (constants)");
-
   await seedPayrollCalendar(prisma, company.id);
   console.log("✅ Payroll calendar seeded");
 
@@ -55,13 +59,6 @@ async function main() {
 
   const deptCount = await seedDepartments(prisma, company.id);
   console.log(`✅ Departments seeded (${deptCount} departments)`);
-
-  // Dev-only seeds
-  // NOTE: Sample employees disabled - upload employees via import
-  // if (env !== "production") {
-  //   await seedSampleEmployees(prisma, company.id);
-  //   console.log("✅ Sample employees seeded (dev only)");
-  // }
 
   console.log("\n✅ Seeding complete!\n");
 

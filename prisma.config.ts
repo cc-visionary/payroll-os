@@ -10,9 +10,7 @@ export default defineConfig({
     seed: "npx tsx prisma/seed/index.ts",
   },
   datasource: {
-    // Primary connection URL (uses pgbouncer on Vercel)
+    // Single URL for both app and migrations (desktop app doesn't need pooler)
     url: process.env["DATABASE_URL"]!,
-    // Direct URL is configured via DIRECT_URL env var in schema.prisma
-    // and handled automatically by Prisma
   },
 });
