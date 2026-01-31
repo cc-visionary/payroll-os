@@ -19,7 +19,8 @@
     "electron:dev": "npm run electron:compile && concurrently \"npm run dev\" \"wait-on http://localhost:3000 && electron .\"",
     "electron:build": "npm run build && npm run electron:compile && electron-builder",
     "electron:compile": "npx tsc -p electron/tsconfig.json",
-    "electron:pack": "npm run build && npm run electron:compile && electron-builder --dir"
+    "electron:pack": "npm run build && npm run electron:compile && electron-builder --dir",
+    "electron:publish": "dotenv -e .env -- npm run electron:build -- --publish always"
   },
   "prisma": {
     "seed": "npx tsx prisma/seed/index.ts"
@@ -52,6 +53,7 @@
     "babel-plugin-react-compiler": "1.0.0",
     "concurrently": "^9.2.1",
     "dotenv": "^16.5.0",
+    "dotenv-cli": "^11.0.0",
     "electron": "^33.4.11",
     "electron-builder": "^25.1.8",
     "electron-updater": "^6.7.3",
