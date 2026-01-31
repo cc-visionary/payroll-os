@@ -46,6 +46,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Generate Prisma client
+        run: npx prisma generate
+
       - name: Build and publish
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
