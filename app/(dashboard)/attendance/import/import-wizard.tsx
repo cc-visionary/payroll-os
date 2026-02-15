@@ -136,7 +136,7 @@ export function AttendanceImportWizard() {
           importId: createResult.importId,
           rows: rows.map((r) => ({
             rowNumber: r.rowNumber,
-            rawData: r.rawData,
+            rawData: JSON.parse(JSON.stringify(r.rawData)),
             employeeCode: r.employeeCode,
             employeeEmail: r.employeeEmail,
             employeeName: r.employeeName,

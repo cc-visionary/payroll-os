@@ -53,17 +53,26 @@ export interface AttendanceRecord {
   otRestDayMinutes?: number;
   otHolidayMinutes?: number;
   isOtApproved?: boolean;
+  // Independent approval flags
+  earlyInApproved?: boolean;
+  lateOutApproved?: boolean;
+  // Break OT (auto-approved, from working through break)
+  breakOtMinutes?: number;
+  otBreakMinutes?: number;
   // Night differential
   nightDiffMinutes?: number;
   // Break info
   breakMinutes: number;
   shiftBreakMinutes: number;
+  // Daily rate override
+  dailyRateOverride?: number | null;
   // Override info
   hasOverride?: boolean;
   override?: {
     breakMinutesOverride: number | null;
     earlyInApproved: boolean;
     lateOutApproved: boolean;
+    dailyRateOverride: number | null;
     reason: string;
   };
 }

@@ -119,9 +119,12 @@ export interface EmployeeAttendanceEntry {
   // Overtime: Early In (clocked in before start) + Late Out (clocked out after end)
   isEarlyIn: boolean;
   earlyInMinutes: number;
+  earlyInApproved: boolean;
   isLateOut: boolean;
   lateOutMinutes: number;
-  totalOvertimeMinutes: number; // earlyInMinutes + lateOutMinutes
+  lateOutApproved: boolean;
+  breakOtMinutes: number;       // OT from working through break (auto-approved)
+  totalOvertimeMinutes: number; // earlyInMinutes + lateOutMinutes + breakOtMinutes
   // Shift schedule info
   scheduledStartTime: string | null; // HH:mm format
   scheduledEndTime: string | null;   // HH:mm format
@@ -134,11 +137,14 @@ export interface EmployeeAttendanceEntry {
   shiftBreakMinutes: number;      // Original shift template break minutes
   isBreakApplicable: boolean;
   // Override info (if any manual override exists)
+  // Daily rate override
+  dailyRateOverride: number | null;
   hasOverride: boolean;
   override?: {
     shiftStartOverride: string | null;
     shiftEndOverride: string | null;
     breakMinutesOverride: number | null;
+    dailyRateOverride: number | null;
     earlyInApproved: boolean;
     lateOutApproved: boolean;
     lateInApproved: boolean;
@@ -165,7 +171,8 @@ export interface EmployeeAttendanceSummary {
   // Overtime
   totalEarlyInMinutes: number;
   totalLateOutMinutes: number;
-  totalOvertimeMinutes: number; // earlyIn + lateOut combined
+  totalBreakOtMinutes: number;
+  totalOvertimeMinutes: number; // earlyIn + lateOut + breakOt combined
 }
 
 const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
@@ -399,7 +406,8 @@ export async function getEmployeeAttendance(
       let scheduledHours: number | null = null;
       let shiftBreakMinutes = 60; // Original shift break (for adjustment calculation)
       let breakMinutes = 60; // Effective break (may be overridden)
-      let breakEndTime: string | null = null; // For late calculation adjustment
+      let breakStartTime: string | null = null; // For break window overlap calculation
+      let breakEndTime: string | null = null; // For break window overlap calculation
       let graceMinutesLate = 0;
       let graceMinutesEarlyOut = 0;
 
@@ -415,6 +423,10 @@ export async function getEmployeeAttendance(
         breakMinutes = shift.breakMinutes;
         graceMinutesLate = shift.graceMinutesLate;
         graceMinutesEarlyOut = shift.graceMinutesEarlyOut;
+        if (shift.breakStartTime) {
+          const breakStartT = new Date(shift.breakStartTime);
+          breakStartTime = `${breakStartT.getUTCHours().toString().padStart(2, '0')}:${breakStartT.getUTCMinutes().toString().padStart(2, '0')}`;
+        }
         if (shift.breakEndTime) {
           const breakEndT = new Date(shift.breakEndTime);
           breakEndTime = `${breakEndT.getUTCHours().toString().padStart(2, '0')}:${breakEndT.getUTCMinutes().toString().padStart(2, '0')}`;
@@ -555,21 +567,19 @@ export async function getEmployeeAttendance(
           isLate = true;
           lateMinutes = Math.round((clockInTime.getTime() - standardStart.getTime()) / (1000 * 60));
 
-          // If time in is after break end, subtract break duration from late minutes
-          // (employee missed the morning session + break, shouldn't be penalized for break time)
-          // NOTE: This only applies if they arrived AFTER the break ended (e.g., after 1 PM)
-          if (breakEndTime) {
+          // Exclude break window overlap from late period [standardStart, clockInTime]
+          // e.g., arriving at 2:05 PM with 1-2 PM break: 60 min of break falls in the late period
+          if (breakStartTime && breakEndTime) {
+            const [breakStartH, breakStartM] = breakStartTime.split(':').map(Number);
             const [breakEndH, breakEndM] = breakEndTime.split(':').map(Number);
+            const breakStartDT = setManilaHours(new Date(clockInTime), breakStartH, breakStartM);
             const breakEndDT = setManilaHours(new Date(clockInTime), breakEndH, breakEndM);
 
-            if (clockInTime > breakEndDT) {
-              // Use the effective break minutes (which may be overridden)
-              lateMinutes = Math.max(0, lateMinutes - breakMinutes);
-            }
+            const overlapStart = Math.max(standardStart.getTime(), breakStartDT.getTime());
+            const overlapEnd = Math.min(clockInTime.getTime(), breakEndDT.getTime());
+            const breakOverlap = Math.max(0, Math.round((overlapEnd - overlapStart) / (1000 * 60)));
+            lateMinutes = Math.max(0, lateMinutes - breakOverlap);
           }
-          // NOTE: Break adjustment (breakAdjustmentMinutes) should NOT be applied to late minutes.
-          // Being late in the morning has nothing to do with whether lunch break was taken.
-          // Break adjustment only applies to undertime (leaving early).
         }
       }
 
@@ -603,14 +613,30 @@ export async function getEmployeeAttendance(
           isUndertime = true;
           undertimeMinutes = Math.round((standardEnd.getTime() - clockOutTime.getTime()) / (1000 * 60));
 
-          // Apply break adjustment - if break was reduced/removed, reduce undertime
-          // (schedule window includes break time that's no longer applicable)
+          // Exclude break window overlap from undertime period [clockOutTime, standardEnd]
+          // e.g., leaving at 1:06 PM with 1-2 PM break: 54 min of break is in undertime period
+          let breakOverlapInUndertime = 0;
+          if (breakStartTime && breakEndTime) {
+            const [breakStartH, breakStartM] = breakStartTime.split(':').map(Number);
+            const [breakEndH, breakEndM] = breakEndTime.split(':').map(Number);
+            const breakStartDT = setManilaHours(new Date(clockOutTime), breakStartH, breakStartM);
+            const breakEndDT = setManilaHours(new Date(clockOutTime), breakEndH, breakEndM);
+
+            const overlapStart = Math.max(clockOutTime.getTime(), breakStartDT.getTime());
+            const overlapEnd = Math.min(standardEnd.getTime(), breakEndDT.getTime());
+            breakOverlapInUndertime = Math.max(0, Math.round((overlapEnd - overlapStart) / (1000 * 60)));
+            undertimeMinutes = Math.max(0, undertimeMinutes - breakOverlapInUndertime);
+          }
+
+          // Apply break adjustment, reduced by break overlap to prevent double-counting
           if (breakAdjustmentMinutes > 0) {
-            undertimeMinutes = Math.max(0, undertimeMinutes - breakAdjustmentMinutes);
-            // If undertime minutes reduced to 0, clear undertime flag
-            if (undertimeMinutes === 0) {
-              isUndertime = false;
-            }
+            const effectiveBreakAdjustment = Math.max(0, breakAdjustmentMinutes - breakOverlapInUndertime);
+            undertimeMinutes = Math.max(0, undertimeMinutes - effectiveBreakAdjustment);
+          }
+
+          // If undertime reduced to 0, clear the flag
+          if (undertimeMinutes === 0) {
+            isUndertime = false;
           }
         }
       }
@@ -622,10 +648,10 @@ export async function getEmployeeAttendance(
       }
 
       // Calculate early in (overtime - clocked in before scheduled start)
-      // IMPORTANT: Only count as overtime if explicitly approved via override
+      // Always calculate so it can be displayed as pending in the attendance tab
       let isEarlyIn = false;
       let earlyInMinutes = 0;
-      if (clockInTime && !isRestDay && scheduledStartTime && record?.earlyInApproved) {
+      if (clockInTime && !isRestDay && scheduledStartTime) {
         const [startH, startM] = scheduledStartTime.split(':').map(Number);
         const standardStart = setManilaHours(new Date(clockInTime), startH, startM);
 
@@ -636,10 +662,10 @@ export async function getEmployeeAttendance(
       }
 
       // Calculate late out (overtime - clocked out after scheduled end)
-      // IMPORTANT: Only count as overtime if explicitly approved via override
+      // Always calculate so it can be displayed as pending in the attendance tab
       let isLateOut = false;
       let lateOutMinutes = 0;
-      if (clockOutTime && (attendanceType === "PRESENT" || attendanceType === "HALF_DAY") && scheduledEndTime && record?.lateOutApproved) {
+      if (clockOutTime && (attendanceType === "PRESENT" || attendanceType === "HALF_DAY") && scheduledEndTime) {
         const [endH, endM] = scheduledEndTime.split(':').map(Number);
         const standardEnd = setManilaHours(new Date(clockOutTime), endH, endM);
 
@@ -657,9 +683,15 @@ export async function getEmployeeAttendance(
         }
       }
 
+      // Break OT: when break is overridden/reduced, worked break time is auto-approved OT
+      let breakOtMinutes = 0;
+      if (record?.breakMinutesApplied !== null && record?.breakMinutesApplied !== undefined) {
+        breakOtMinutes = Math.max(0, shiftBreakMinutes - record.breakMinutesApplied);
+      }
+
       // Calculate totals
       const totalDeductionMinutes = lateMinutes + undertimeMinutes;
-      const totalOvertimeMinutes = earlyInMinutes + lateOutMinutes;
+      const totalOvertimeMinutes = earlyInMinutes + lateOutMinutes + breakOtMinutes;
 
       entries.push({
         id: `${employeeId}-${dateKey}`,
@@ -679,8 +711,11 @@ export async function getEmployeeAttendance(
         totalDeductionMinutes,
         isEarlyIn,
         earlyInMinutes,
+        earlyInApproved: record?.earlyInApproved ?? false,
         isLateOut,
         lateOutMinutes,
+        lateOutApproved: record?.lateOutApproved ?? false,
+        breakOtMinutes,
         totalOvertimeMinutes,
         scheduledStartTime,
         scheduledEndTime,
@@ -690,12 +725,15 @@ export async function getEmployeeAttendance(
         breakMinutes,
         shiftBreakMinutes,
         isBreakApplicable: (hoursWorked || 0) > 5,
+        // Daily rate override
+        dailyRateOverride: record?.dailyRateOverride ? Number(record.dailyRateOverride) : null,
         // Override data now comes directly from the record
-        hasOverride: !!(record?.overrideReason || record?.earlyInApproved || record?.lateOutApproved || record?.lateInApproved || record?.earlyOutApproved || record?.breakMinutesApplied !== null),
+        hasOverride: !!(record?.overrideReason || record?.earlyInApproved || record?.lateOutApproved || record?.lateInApproved || record?.earlyOutApproved || record?.breakMinutesApplied !== null || record?.dailyRateOverride !== null),
         override: record ? {
           shiftStartOverride: null,
           shiftEndOverride: null,
           breakMinutesOverride: record.breakMinutesApplied,
+          dailyRateOverride: record.dailyRateOverride ? Number(record.dailyRateOverride) : null,
           earlyInApproved: record.earlyInApproved,
           lateOutApproved: record.lateOutApproved,
           lateInApproved: record.lateInApproved,
@@ -710,8 +748,9 @@ export async function getEmployeeAttendance(
     // Holidays where you worked count as both a work day AND a holiday (for premium pay)
     const totalLateMinutes = entries.reduce((sum, e) => sum + e.lateMinutes, 0);
     const totalUndertimeMinutes = entries.reduce((sum, e) => sum + e.undertimeMinutes, 0);
-    const totalEarlyInMinutes = entries.reduce((sum, e) => sum + e.earlyInMinutes, 0);
-    const totalLateOutMinutes = entries.reduce((sum, e) => sum + e.lateOutMinutes, 0);
+    const totalEarlyInMinutes = entries.reduce((sum, e) => sum + (e.earlyInApproved ? e.earlyInMinutes : 0), 0);
+    const totalLateOutMinutes = entries.reduce((sum, e) => sum + (e.lateOutApproved ? e.lateOutMinutes : 0), 0);
+    const totalBreakOtMinutes = entries.reduce((sum, e) => sum + e.breakOtMinutes, 0);
 
     const summary: EmployeeAttendanceSummary = {
       totalDays: entries.length,
@@ -738,7 +777,8 @@ export async function getEmployeeAttendance(
       // Overtime
       totalEarlyInMinutes,
       totalLateOutMinutes,
-      totalOvertimeMinutes: totalEarlyInMinutes + totalLateOutMinutes,
+      totalBreakOtMinutes,
+      totalOvertimeMinutes: totalEarlyInMinutes + totalLateOutMinutes + totalBreakOtMinutes,
     };
 
     return {
@@ -869,6 +909,8 @@ export interface UpdateAttendanceInput {
   lateOutApproved?: boolean; // Approve late clock out (counts as OT)
   lateInApproved?: boolean; // Excuse late arrival (clear late minutes)
   earlyOutApproved?: boolean; // Excuse early departure (clear undertime)
+  // Daily rate override (null = reset to standard, undefined = no change, number = override)
+  dailyRateOverride?: number | null;
   // Reason
   reason: string;
   reasonCode?: string;
@@ -978,6 +1020,8 @@ export async function updateAttendanceRecord(
       earlyOutApproved: input.earlyOutApproved ?? existingRecord?.earlyOutApproved ?? false,
       // Break override (null = use shift template, 0 = no break, >0 = override)
       ...(input.breakMinutes !== undefined && { breakMinutesApplied: input.breakMinutes }),
+      // Daily rate override (null = reset to standard, number = override rate)
+      ...(input.dailyRateOverride !== undefined && { dailyRateOverride: input.dailyRateOverride }),
       // Override reason tracking
       overrideReason: input.reason,
       overrideReasonCode: input.reasonCode ?? null,
@@ -998,12 +1042,14 @@ export async function updateAttendanceRecord(
           actualTimeIn: existingRecord.actualTimeIn?.toISOString(),
           actualTimeOut: existingRecord.actualTimeOut?.toISOString(),
           breakMinutesApplied: existingRecord.breakMinutesApplied,
+          dailyRateOverride: existingRecord.dailyRateOverride ? Number(existingRecord.dailyRateOverride) : null,
           shiftTemplateId: existingRecord.shiftTemplateId,
         },
         {
           actualTimeIn: actualTimeIn?.toISOString(),
           actualTimeOut: actualTimeOut?.toISOString(),
           breakMinutesApplied: input.breakMinutes,
+          dailyRateOverride: input.dailyRateOverride,
           shiftTemplateId: input.shiftTemplateId,
           reason: input.reason,
         }
@@ -1024,6 +1070,7 @@ export async function updateAttendanceRecord(
         actualTimeIn: actualTimeIn?.toISOString(),
         actualTimeOut: actualTimeOut?.toISOString(),
         breakMinutesApplied: input.breakMinutes,
+        dailyRateOverride: input.dailyRateOverride,
         shiftTemplateId: input.shiftTemplateId,
         reason: input.reason,
       });

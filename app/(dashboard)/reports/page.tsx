@@ -139,6 +139,7 @@ export default function ReportsPage() {
   >([]);
   const [availablePayrollYears, setAvailablePayrollYears] = useState<number[]>([]);
   const [payrollYear, setPayrollYear] = useState(new Date().getFullYear());
+  const [hasPayrollAccess, setHasPayrollAccess] = useState(true);
 
   const months = [
     { value: 1, label: "January" },
@@ -172,8 +173,12 @@ export default function ReportsPage() {
         // Load YTD by default
         const data = await getPayrollSummaryReport(payrollYear);
         setPayrollSummary(data);
-      } catch {
-        setError("Failed to load payroll summary");
+      } catch (err) {
+        if (err instanceof Error && err.message === "Permission denied") {
+          setHasPayrollAccess(false);
+        } else {
+          setError("Failed to load payroll summary");
+        }
       } finally {
         setPayrollSummaryLoading(false);
       }
@@ -549,7 +554,7 @@ export default function ReportsPage() {
       )}
 
       {/* Payroll Summary Report */}
-      <Card>
+      {hasPayrollAccess && <Card>
         <CardHeader>
           <div className="flex justify-between items-center">
             <div>
@@ -864,7 +869,7 @@ export default function ReportsPage() {
             </div>
           )}
         </CardContent>
-      </Card>
+      </Card>}
 
       {/* HRCI Standards Info */}
       <div className="bg-gray-50 rounded-lg p-6 border border-gray-200">

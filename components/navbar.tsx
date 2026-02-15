@@ -19,6 +19,7 @@ interface NavItem {
   label: string;
   href: string;
   icon: React.ReactNode;
+  underDevelopment?: boolean;
 }
 
 interface NavGroup {
@@ -131,8 +132,8 @@ const navGroups: NavGroup[] = [
     items: [
       { label: "Employees", href: "/employees", icon: <UsersIcon /> },
       { label: "Role Scorecards", href: "/role-scorecards", icon: <DocumentTextIcon /> },
-      { label: "Hiring", href: "/hiring", icon: <BriefcaseIcon /> },
-      { label: "Check-Ins", href: "/check-ins", icon: <ClipboardIcon /> },
+      { label: "Hiring", href: "/hiring", icon: <BriefcaseIcon />, underDevelopment: true },
+      { label: "Check-Ins", href: "/check-ins", icon: <ClipboardIcon />, underDevelopment: true },
     ],
   },
   {
@@ -201,6 +202,11 @@ function NavDropdown({ group }: { group: NavGroup }) {
             >
               {item.icon}
               {item.label}
+              {item.underDevelopment && (
+                <span className="ml-auto text-[10px] font-medium text-amber-600 bg-amber-100 px-1.5 py-0.5 rounded">
+                  Soon
+                </span>
+              )}
             </Link>
           ))}
         </div>
@@ -310,6 +316,11 @@ export function MobileNav() {
               >
                 {item.icon}
                 {item.label}
+                {"underDevelopment" in item && item.underDevelopment && (
+                  <span className="ml-auto text-[10px] font-medium text-amber-600 bg-amber-100 px-1.5 py-0.5 rounded">
+                    Soon
+                  </span>
+                )}
               </Link>
             ))}
           </div>

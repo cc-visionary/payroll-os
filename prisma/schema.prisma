@@ -238,6 +238,13 @@ enum PayslipLineCategory {
   LOAN_DEDUCTION
   ADJUSTMENT_DEDUCT
   OTHER_DEDUCTION
+  PENALTY_DEDUCTION
+}
+
+enum PenaltyStatus {
+  ACTIVE    // Installments are being deducted
+  COMPLETED // All installments fully deducted
+  CANCELLED // Penalty voided (remaining installments cancelled)
 }
 
 // Note: StatutoryType enum removed - statutory tables now use constants
@@ -294,6 +301,7 @@ model Company {
   userCompanies    UserCompany[]
   checkInPeriods   CheckInPeriod[]
   hiringEntities   HiringEntity[]
+  penaltyTypes     PenaltyType[]
 
   @@index([code])
   @@map("companies")
@@ -613,6 +621,9 @@ model User {
   // Declared Wage Override
   declaredWageOverrideEmployees Employee[] @relation("DeclaredWageSetBy")
 
+  // Penalties
+  createdPenalties Penalty[] @relation("PenaltyCreatedBy")
+
   @@index([companyId])
   @@index([email])
   @@map("users")
@@ -806,6 +817,9 @@ model Employee {
 
   // Performance Check-ins
   performanceCheckIns PerformanceCheckIn[] @relation("EmployeeCheckIns")
+
+  // Penalties
+  penalties Penalty[]
 
   @@unique([companyId, employeeNumber])
   @@index([companyId, employmentStatus])
@@ -1071,6 +1085,12 @@ model AttendanceDayRecord {
 
   // Break Override (null = use shift template's breakMinutes, 0 = no break, >0 = override)
   breakMinutesApplied Int?
+
+  // Daily Rate Override (null = use employee's standard rate from RoleScorecard)
+  // When set, ALL derived rates for this day are recalculated from this daily rate.
+  // Affects basic pay, OT, late/undertime, night diff, and holiday premiums for this day only.
+  // Does NOT affect statutory (SSS, PhilHealth, Pag-IBIG) or tax calculations.
+  dailyRateOverride Decimal? @db.Decimal(12, 4)
 
   // Leave Info
   leaveRequestId String?  @db.Uuid
@@ -1435,6 +1455,7 @@ model PayslipLine {
   // Source Traceability
   attendanceDayRecordId String? @db.Uuid
   manualAdjustmentId    String? @db.Uuid
+  penaltyInstallmentId  String? @db.Uuid
 
   // Rule Traceability
   ruleCode        String? @db.VarChar(50)
@@ -1445,9 +1466,10 @@ model PayslipLine {
   createdAt DateTime @default(now())
 
   // Relations
-  payslip             Payslip               @relation(fields: [payslipId], references: [id], onDelete: Cascade)
-  attendanceDayRecord AttendanceDayRecord?  @relation("AttendanceSourceLines", fields: [attendanceDayRecordId], references: [id])
-  manualAdjustment    ManualAdjustmentLine? @relation(fields: [manualAdjustmentId], references: [id])
+  payslip              Payslip               @relation(fields: [payslipId], references: [id], onDelete: Cascade)
+  attendanceDayRecord  AttendanceDayRecord?  @relation("AttendanceSourceLines", fields: [attendanceDayRecordId], references: [id])
+  manualAdjustment     ManualAdjustmentLine? @relation(fields: [manualAdjustmentId], references: [id])
+  penaltyInstallment   PenaltyInstallment?   @relation(fields: [penaltyInstallmentId], references: [id])
 
   @@index([payslipId, category])
   @@map("payslip_lines")
@@ -1471,6 +1493,104 @@ model ManualAdjustmentLine {
 
   @@index([payrollRunId, employeeId])
   @@map("manual_adjustment_lines")
+}
+
+// ============================================================================
+// PENALTY MANAGEMENT
+// ============================================================================
+
+/// PenaltyType defines predefined penalty categories configurable per company.
+/// e.g., "Tardiness", "Policy Violation", "Equipment Damage"
+model PenaltyType {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyId   String    @db.Uuid
+  code        String    @db.VarChar(20)
+  name        String    @db.VarChar(100)
+  description String?   @db.Text
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  // Relations
+  company   Company   @relation(fields: [companyId], references: [id])
+  penalties Penalty[]
+
+  @@unique([companyId, code])
+  @@index([companyId, isActive])
+  @@map("penalty_types")
+}
+
+/// Penalty is a penalty record assigned to an employee.
+/// Total amount is split into installments for automatic payroll deduction.
+model Penalty {
+  id         String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  employeeId String @db.Uuid
+
+  // Classification
+  penaltyTypeId     String? @db.Uuid // null when type is "Other"
+  customDescription String? @db.Text // free-text description when penaltyTypeId is null
+
+  // Financials
+  totalAmount       Decimal @db.Decimal(12, 2)
+  installmentCount  Int
+  installmentAmount Decimal @db.Decimal(12, 2) // base installment amount (floor)
+
+  // Status
+  status        PenaltyStatus @default(ACTIVE)
+  effectiveDate DateTime      @db.Date
+  remarks       String?       @db.Text
+
+  // Tracking
+  totalDeducted Decimal   @default(0) @db.Decimal(12, 2)
+  completedAt   DateTime?
+  cancelledAt   DateTime?
+  cancelReason  String?   @db.Text
+
+  // Audit
+  createdById String?  @db.Uuid
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  employee     Employee             @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  penaltyType  PenaltyType?         @relation(fields: [penaltyTypeId], references: [id])
+  createdBy    User?                @relation("PenaltyCreatedBy", fields: [createdById], references: [id])
+  installments PenaltyInstallment[]
+
+  @@index([employeeId, status])
+  @@index([status])
+  @@map("penalties")
+}
+
+/// PenaltyInstallment tracks individual scheduled installments for a penalty.
+/// Each installment is deducted in a specific payroll run.
+model PenaltyInstallment {
+  id        String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  penaltyId String @db.Uuid
+
+  // Schedule
+  installmentNumber Int
+  amount            Decimal @db.Decimal(12, 2)
+
+  // Deduction Tracking
+  isDeducted   Boolean   @default(false)
+  deductedAt   DateTime?
+  payrollRunId String?   @db.Uuid
+  payslipLineId String?  @db.Uuid
+
+  // Metadata
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  penalty      Penalty      @relation(fields: [penaltyId], references: [id], onDelete: Cascade)
+  payslipLines PayslipLine[]
+
+  @@unique([penaltyId, installmentNumber])
+  @@index([penaltyId, isDeducted])
+  @@index([payrollRunId])
+  @@map("penalty_installments")
 }
 
 /// BankFile stores generated bank disbursement files

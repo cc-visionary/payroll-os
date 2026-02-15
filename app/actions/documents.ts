@@ -572,16 +572,7 @@ export async function generatePayslips(payrollRunId: string) {
           holidayOtMins += Math.max(0, grossWorkedMins - breakMins);
         }
 
-        // Night differential (simplified - full calculation would check 10pm-6am)
-        // For dashboard purposes, estimate based on shift times
-        const ND_START = 22 * 60; // 10pm
-        const ND_END = 6 * 60;    // 6am
-        const clockInMins = r.actualTimeIn.getHours() * 60 + r.actualTimeIn.getMinutes();
-        const clockOutMins = r.actualTimeOut.getHours() * 60 + r.actualTimeOut.getMinutes();
-        if (clockInMins >= ND_START || clockOutMins <= ND_END || clockOutMins >= ND_START) {
-          // Simplified: assume some ND if any part of shift is in ND hours
-          totalNdMins += Math.min(60, grossWorkedMins); // Cap at 60 for estimation
-        }
+        // ND will be accurately computed per-record below and summed into totalNdMins
       }
 
       const attendanceSummary = {
@@ -655,8 +646,15 @@ export async function generatePayslips(payrollRunId: string) {
 
         const clockIn = record.actualTimeIn;
         const clockOut = record.actualTimeOut;
+        // Effective clock times: bounded by schedule unless OT approved (used for ND calc too)
+        let effectiveClockIn = clockIn;
+        let effectiveClockOut = clockOut;
 
         if (clockIn && clockOut && scheduledStartTime && scheduledEndTime) {
+          // Re-assign after null narrowing so TypeScript knows these are Date
+          effectiveClockIn = clockIn;
+          effectiveClockOut = clockOut;
+
           const [startH, startM] = scheduledStartTime.split(':').map(Number);
           const [endH, endM] = scheduledEndTime.split(':').map(Number);
 
@@ -689,9 +687,6 @@ export async function generatePayslips(payrollRunId: string) {
           }
 
           // Calculate worked minutes (schedule-bounded unless OT approved)
-          let effectiveClockIn = clockIn;
-          let effectiveClockOut = clockOut;
-
           if (clockIn < schedStart && !record.earlyInApproved) {
             effectiveClockIn = schedStart;
           }
@@ -715,13 +710,14 @@ export async function generatePayslips(payrollRunId: string) {
           holidayOt = workedMinutes;
         }
 
-        // Calculate night differential on the fly (10pm - 6am)
+        // Calculate night differential on effective (schedule-bounded) times (10pm - 6am)
+        // ND only applies to approved work time, not unapproved OT
         let ndMinutes = 0;
-        if (clockIn && clockOut) {
+        if (effectiveClockIn && effectiveClockOut) {
           const ND_START = 22 * 60; // 10pm
           const ND_END = 6 * 60 + 1440; // 6am next day
-          const clockInMins = clockIn.getHours() * 60 + clockIn.getMinutes();
-          let clockOutMins = clockOut.getHours() * 60 + clockOut.getMinutes();
+          const clockInMins = effectiveClockIn.getHours() * 60 + effectiveClockIn.getMinutes();
+          let clockOutMins = effectiveClockOut.getHours() * 60 + effectiveClockOut.getMinutes();
           // Handle overnight
           if (clockOutMins < clockInMins) clockOutMins += 1440;
           // Calculate overlap with ND period
@@ -760,6 +756,9 @@ export async function generatePayslips(payrollRunId: string) {
           notes: record.overrideReason,
         };
       });
+
+      // Override summary ND with accurate per-record values
+      attendanceSummary.totalNdMins = attendanceRecordsForPdf.reduce((sum, r) => sum + r.ndMinutes, 0);
 
       // Generate payslip PDF content using PDFKit
       const pdfContent = await generatePayslipPDF(
@@ -1074,16 +1073,7 @@ export async function generatePayslipsInternal(payrollRunId: string, userId: str
           holidayOtMins += Math.max(0, grossWorkedMins - breakMins);
         }
 
-        // Night differential (simplified - full calculation would check 10pm-6am)
-        // For dashboard purposes, estimate based on shift times
-        const ND_START = 22 * 60; // 10pm
-        const ND_END = 6 * 60;    // 6am
-        const clockInMins = r.actualTimeIn.getHours() * 60 + r.actualTimeIn.getMinutes();
-        const clockOutMins = r.actualTimeOut.getHours() * 60 + r.actualTimeOut.getMinutes();
-        if (clockInMins >= ND_START || clockOutMins <= ND_END || clockOutMins >= ND_START) {
-          // Simplified: assume some ND if any part of shift is in ND hours
-          totalNdMins += Math.min(60, grossWorkedMins); // Cap at 60 for estimation
-        }
+        // ND will be accurately computed per-record below and summed into totalNdMins
       }
 
       const attendanceSummary = {
@@ -1157,8 +1147,15 @@ export async function generatePayslipsInternal(payrollRunId: string, userId: str
 
         const clockIn = record.actualTimeIn;
         const clockOut = record.actualTimeOut;
+        // Effective clock times: bounded by schedule unless OT approved (used for ND calc too)
+        let effectiveClockIn = clockIn;
+        let effectiveClockOut = clockOut;
 
         if (clockIn && clockOut && scheduledStartTime && scheduledEndTime) {
+          // Re-assign after null narrowing so TypeScript knows these are Date
+          effectiveClockIn = clockIn;
+          effectiveClockOut = clockOut;
+
           const [startH, startM] = scheduledStartTime.split(':').map(Number);
           const [endH, endM] = scheduledEndTime.split(':').map(Number);
 
@@ -1191,9 +1188,6 @@ export async function generatePayslipsInternal(payrollRunId: string, userId: str
           }
 
           // Calculate worked minutes (schedule-bounded unless OT approved)
-          let effectiveClockIn = clockIn;
-          let effectiveClockOut = clockOut;
-
           if (clockIn < schedStart && !record.earlyInApproved) {
             effectiveClockIn = schedStart;
           }
@@ -1217,13 +1211,14 @@ export async function generatePayslipsInternal(payrollRunId: string, userId: str
           holidayOt = workedMinutes;
         }
 
-        // Calculate night differential on the fly (10pm - 6am)
+        // Calculate night differential on effective (schedule-bounded) times (10pm - 6am)
+        // ND only applies to approved work time, not unapproved OT
         let ndMinutes = 0;
-        if (clockIn && clockOut) {
+        if (effectiveClockIn && effectiveClockOut) {
           const ND_START = 22 * 60; // 10pm
           const ND_END = 6 * 60 + 1440; // 6am next day
-          const clockInMins = clockIn.getHours() * 60 + clockIn.getMinutes();
-          let clockOutMins = clockOut.getHours() * 60 + clockOut.getMinutes();
+          const clockInMins = effectiveClockIn.getHours() * 60 + effectiveClockIn.getMinutes();
+          let clockOutMins = effectiveClockOut.getHours() * 60 + effectiveClockOut.getMinutes();
           // Handle overnight
           if (clockOutMins < clockInMins) clockOutMins += 1440;
           // Calculate overlap with ND period
@@ -1262,6 +1257,9 @@ export async function generatePayslipsInternal(payrollRunId: string, userId: str
           notes: record.overrideReason,
         };
       });
+
+      // Override summary ND with accurate per-record values
+      attendanceSummary.totalNdMins = attendanceRecordsForPdf.reduce((sum, r) => sum + r.ndMinutes, 0);
 
       // Generate payslip PDF content using PDFKit
       const pdfContent = await generatePayslipPDF(

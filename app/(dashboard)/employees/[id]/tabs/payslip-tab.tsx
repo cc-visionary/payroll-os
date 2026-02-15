@@ -4,7 +4,7 @@
 // PeopleOS PH - Payslip Tab
 // =============================================================================
 
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -92,6 +92,36 @@ export function PayslipTab({
   >({});
   const [loading, setLoading] = useState<string | null>(null);
 
+  // Date range filter — defaults to current year
+  const currentYear = new Date().getFullYear();
+  const [filterStart, setFilterStart] = useState(`${currentYear}-01-01`);
+  const [filterEnd, setFilterEnd] = useState(`${currentYear}-12-31`);
+
+  const filteredPayslips = useMemo(() => {
+    return payslips.filter((p) => {
+      const periodStart = p.payPeriodStart.slice(0, 10);
+      if (filterStart && periodStart < filterStart) return false;
+      if (filterEnd && periodStart > filterEnd) return false;
+      return true;
+    });
+  }, [payslips, filterStart, filterEnd]);
+
+  const totals = useMemo(() => {
+    let grossPay = 0, deductions = 0, netPay = 0;
+    let sss = 0, philhealth = 0, pagibig = 0, tax = 0;
+    for (const p of filteredPayslips) {
+      grossPay += Number(p.grossPay);
+      deductions += Number(p.totalDeductions);
+      netPay += Number(p.netPay);
+      sss += Number(p.sssEe);
+      philhealth += Number(p.philhealthEe);
+      pagibig += Number(p.pagibigEe);
+      tax += Number(p.withholdingTax);
+    }
+    return { grossPay, deductions, netPay, sss, philhealth, pagibig, tax,
+      totalBenefits: sss + philhealth + pagibig };
+  }, [filteredPayslips]);
+
   const handleToggleExpand = async (payslipId: string) => {
     if (expandedPayslipId === payslipId) {
       setExpandedPayslipId(null);
@@ -155,17 +185,80 @@ export function PayslipTab({
 
   return (
     <div className="space-y-6">
+      {/* Date Range Filter */}
+      <div className="flex items-center gap-4">
+        <div className="flex items-center gap-2">
+          <label className="text-sm text-gray-600">From</label>
+          <input
+            type="date"
+            value={filterStart}
+            onChange={(e) => setFilterStart(e.target.value)}
+            className="px-3 py-1.5 border border-gray-300 rounded-lg bg-white text-sm text-gray-900 focus:ring-blue-500 focus:border-blue-500"
+          />
+        </div>
+        <div className="flex items-center gap-2">
+          <label className="text-sm text-gray-600">To</label>
+          <input
+            type="date"
+            value={filterEnd}
+            onChange={(e) => setFilterEnd(e.target.value)}
+            className="px-3 py-1.5 border border-gray-300 rounded-lg bg-white text-sm text-gray-900 focus:ring-blue-500 focus:border-blue-500"
+          />
+        </div>
+      </div>
+
+      {/* Summary Cards */}
+      {filteredPayslips.length > 0 && (
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+          <div className="p-4 bg-blue-50 rounded-lg">
+            <div className="text-sm text-blue-600">Total Gross Pay</div>
+            <div className="text-lg font-bold text-blue-900">
+              {formatCurrency(totals.grossPay)}
+            </div>
+          </div>
+          <div className="p-4 bg-red-50 rounded-lg">
+            <div className="text-sm text-red-600">Total Deductions</div>
+            <div className="text-lg font-bold text-red-900">
+              {formatCurrency(totals.deductions)}
+            </div>
+          </div>
+          <div className="p-4 bg-green-50 rounded-lg">
+            <div className="text-sm text-green-600">Total Net Pay</div>
+            <div className="text-lg font-bold text-green-900">
+              {formatCurrency(totals.netPay)}
+            </div>
+          </div>
+          <div className="p-4 bg-yellow-50 rounded-lg">
+            <div className="text-sm text-yellow-600">Total Withholding Tax</div>
+            <div className="text-lg font-bold text-yellow-900">
+              {formatCurrency(totals.tax)}
+            </div>
+          </div>
+          <div className="p-4 bg-purple-50 rounded-lg">
+            <div className="text-sm text-purple-600">Total Benefits (EE)</div>
+            <div className="text-lg font-bold text-purple-900">
+              {formatCurrency(totals.totalBenefits)}
+            </div>
+            <div className="text-xs text-purple-500 mt-1">
+              SSS: {formatCurrency(totals.sss)} · PhilHealth:{" "}
+              {formatCurrency(totals.philhealth)} · Pag-IBIG:{" "}
+              {formatCurrency(totals.pagibig)}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Payslip History */}
       <Card>
         <CardHeader>
           <CardTitle>Payslip History</CardTitle>
         </CardHeader>
         <CardContent>
-          {payslips.length === 0 ? (
-            <p className="text-gray-500">No payslips found for this employee</p>
+          {filteredPayslips.length === 0 ? (
+            <p className="text-gray-500">No payslips found for this date range</p>
           ) : (
             <div className="space-y-4">
-              {payslips.map((payslip) => {
+              {filteredPayslips.map((payslip) => {
                 const isExpanded = expandedPayslipId === payslip.id;
                 const detail = payslipDetails[payslip.id];
                 const isLoading = loading === payslip.id;

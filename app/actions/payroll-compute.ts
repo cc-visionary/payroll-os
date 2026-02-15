@@ -53,6 +53,7 @@ interface AttendanceCalc {
   undertimeMinutes: number;
   otEarlyInMinutes: number;
   otLateOutMinutes: number;
+  otBreakMinutes: number;
   workedMinutes: number;
   nightDiffMinutes: number;
 }
@@ -76,10 +77,13 @@ function calculateAttendanceMetrics(
   attendanceDate?: Date,
   // Break override info for adjusting late/undertime calculations
   shiftBreakMinutes?: number,
-  breakMinutesApplied?: number | null
+  breakMinutesApplied?: number | null,
+  // Break window times for excluding break from late/undertime overlap
+  breakStartTime?: Date | string | null,
+  breakEndTime?: Date | string | null
 ): AttendanceCalc {
   if (!actualTimeIn || !actualTimeOut) {
-    return { lateMinutes: 0, undertimeMinutes: 0, otEarlyInMinutes: 0, otLateOutMinutes: 0, workedMinutes: 0, nightDiffMinutes: 0 };
+    return { lateMinutes: 0, undertimeMinutes: 0, otEarlyInMinutes: 0, otLateOutMinutes: 0, otBreakMinutes: 0, workedMinutes: 0, nightDiffMinutes: 0 };
   }
 
   const clockIn = new Date(actualTimeIn);
@@ -96,7 +100,9 @@ function calculateAttendanceMetrics(
     earlyInApproved,
     lateOutApproved,
     shiftBreakMinutes,
-    breakMinutesApplied
+    breakMinutesApplied,
+    breakStartTime,
+    breakEndTime
   );
 
   // Apply excusal flags (lateInApproved excuses late, earlyOutApproved excuses undertime)
@@ -113,6 +119,10 @@ function calculateAttendanceMetrics(
   const endTime = extractTimeComponents(scheduledEndTime);
 
   let workedMinutes = 0;
+  // Effective clock times: bounded by schedule unless OT is approved
+  // Used for both worked minutes and ND calculation (ND only applies to approved work time)
+  let effectiveClockIn = clockIn;
+  let effectiveClockOut = clockOut;
 
   if (startTime && endTime) {
     // Build schedule times using Manila timezone utility
@@ -125,9 +135,6 @@ function calculateAttendanceMetrics(
     }
 
     // Calculate worked minutes (schedule-bounded unless OT approved)
-    let effectiveClockIn = clockIn;
-    let effectiveClockOut = clockOut;
-
     if (clockIn < schedStart && !earlyInApproved) {
       effectiveClockIn = schedStart;
     }
@@ -145,15 +152,16 @@ function calculateAttendanceMetrics(
   }
 
   // Calculate night differential (10pm - 6am per PH Labor Code)
+  // Uses effective (schedule-bounded) times so ND only applies to approved work time
   const ND_START_HOUR = 22; // 10:00 PM
   const ND_END_HOUR = 6;    // 6:00 AM
 
-  const clockInHour = clockIn.getHours();
-  const clockInMin = clockIn.getMinutes();
+  const clockInHour = effectiveClockIn.getHours();
+  const clockInMin = effectiveClockIn.getMinutes();
   let clockInTotalMins = clockInHour * 60 + clockInMin;
 
-  const clockOutHour = clockOut.getHours();
-  const clockOutMin = clockOut.getMinutes();
+  const clockOutHour = effectiveClockOut.getHours();
+  const clockOutMin = effectiveClockOut.getMinutes();
   let clockOutTotalMins = clockOutHour * 60 + clockOutMin;
 
   // Handle overnight shifts (clock out on next day)
@@ -175,6 +183,7 @@ function calculateAttendanceMetrics(
     undertimeMinutes,
     otEarlyInMinutes: calc.otEarlyInMinutes,
     otLateOutMinutes: calc.otLateOutMinutes,
+    otBreakMinutes: calc.otBreakMinutes,
     workedMinutes,
     nightDiffMinutes,
   };
@@ -245,7 +254,8 @@ export async function runPayrollComputation(payrollRunId: string): Promise<{
         auth.user.companyId,
         payrollRun.payPeriod.startDate,
         payrollRun.payPeriod.endDate,
-        payrollRunId
+        payrollRunId,
+        payrollRun.payPeriod.calendar.payFrequency
       );
 
       // Build pay period input
@@ -410,7 +420,8 @@ export async function computePayrollForEmployees(
         payrollRun.payPeriod.startDate,
         payrollRun.payPeriod.endDate,
         payrollRunId,
-        employeeIds
+        employeeIds,
+        payrollRun.payPeriod.calendar.payFrequency
       );
 
       if (employeeInputs.length === 0) {
@@ -847,7 +858,8 @@ async function loadEmployeeInputs(
   companyId: string,
   startDate: Date,
   endDate: Date,
-  payrollRunId: string
+  payrollRunId: string,
+  payFrequency: string
 ): Promise<EmployeePayrollInput[]> {
   // Load active employees with role scorecards and attendance
   const employees = await prisma.employee.findMany({
@@ -867,7 +879,7 @@ async function loadEmployeeInputs(
         include: {
           holiday: true,
           leaveRequest: { include: { leaveType: true } },
-          shiftTemplate: { select: { startTime: true, endTime: true, breakMinutes: true, isOvernight: true, scheduledWorkMinutes: true } },
+          shiftTemplate: { select: { startTime: true, endTime: true, breakMinutes: true, breakStartTime: true, breakEndTime: true, isOvernight: true, scheduledWorkMinutes: true } },
         },
       },
     },
@@ -878,7 +890,29 @@ async function loadEmployeeInputs(
     where: { payrollRunId },
   });
 
+  // Load pending penalty installments for active penalties
+  const penaltyInstallments = await prisma.penaltyInstallment.findMany({
+    where: {
+      isDeducted: false,
+      penalty: {
+        employee: { companyId, employmentStatus: "ACTIVE" },
+        status: "ACTIVE",
+        effectiveDate: { lte: endDate },
+      },
+    },
+    include: {
+      penalty: {
+        include: { penaltyType: { select: { name: true } } },
+      },
+    },
+    orderBy: [
+      { penalty: { effectiveDate: "asc" } },
+      { installmentNumber: "asc" },
+    ],
+  });
+
   // Load YTD from previous payslips in same year
+  // Include BASIC_PAY and LATE_UT_DEDUCTION line items for accurate YTD recalculation
   const year = startDate.getFullYear();
   const ytdPayslips = await prisma.payslip.findMany({
     where: {
@@ -891,22 +925,22 @@ async function loadEmployeeInputs(
         },
       },
     },
-    orderBy: { createdAt: "desc" },
+    include: {
+      lines: {
+        where: { category: { in: ["BASIC_PAY", "LATE_UT_DEDUCTION"] } },
+        select: { category: true, amount: true },
+      },
+    },
+    orderBy: { createdAt: "asc" },
   });
 
-  // Build YTD map (get latest per employee)
-  const ytdMap = new Map<
-    string,
-    { grossPay: number; taxableIncome: number; taxWithheld: number }
-  >();
+  // Group all payslips by employee (not just latest - we recompute YTD from per-period data)
+  const payslipsByEmployee = new Map<string, typeof ytdPayslips>();
   for (const ps of ytdPayslips) {
-    if (!ytdMap.has(ps.employeeId)) {
-      ytdMap.set(ps.employeeId, {
-        grossPay: Number(ps.ytdGrossPay),
-        taxableIncome: Number(ps.ytdTaxableIncome),
-        taxWithheld: Number(ps.ytdTaxWithheld),
-      });
+    if (!payslipsByEmployee.has(ps.employeeId)) {
+      payslipsByEmployee.set(ps.employeeId, []);
     }
+    payslipsByEmployee.get(ps.employeeId)!.push(ps);
   }
 
   // Default rest days: Saturday (6) and Sunday (0)
@@ -916,17 +950,38 @@ async function loadEmployeeInputs(
   // Get calendar events (holidays) for the date range
   const eventMap = await buildEventMap(companyId, startDate, endDate);
 
+  // Build penalty deductions map: next un-deducted installment per penalty per employee
+  const penaltyByEmployee = new Map<string, Array<{ installmentId: string; penaltyId: string; description: string; amount: number }>>();
+  const seenPenalties = new Set<string>();
+  for (const pi of penaltyInstallments) {
+    const empId = pi.penalty.employeeId;
+    if (seenPenalties.has(pi.penaltyId)) continue; // Only first un-deducted per penalty
+    seenPenalties.add(pi.penaltyId);
+    if (!penaltyByEmployee.has(empId)) penaltyByEmployee.set(empId, []);
+    penaltyByEmployee.get(empId)!.push({
+      installmentId: pi.id,
+      penaltyId: pi.penaltyId,
+      description: `${pi.penalty.penaltyType?.name || pi.penalty.customDescription || "Penalty"} (${pi.installmentNumber}/${pi.penalty.installmentCount})`,
+      amount: Number(pi.amount),
+    });
+  }
+
+  // Compute periodsPerMonth from pay frequency
+  const periodsPerMonth = toPeriodsPerMonth(payFrequency);
+
   // Transform to input format - only include employees with role scorecards
   return employees
     .filter((e) => e.roleScorecard !== null)
     .map((e) => {
       const scorecard = e.roleScorecard!;
       const empAdjustments = adjustments.filter((a) => a.employeeId === e.id);
-      const ytd = ytdMap.get(e.id) || {
-        grossPay: 0,
-        taxableIncome: 0,
-        taxWithheld: 0,
-      };
+      const ytd = computeEmployeeYtd(
+        payslipsByEmployee.get(e.id) || [],
+        e.taxOnFullEarnings,
+        e.declaredWageOverride ? Number(e.declaredWageOverride) : null,
+        (e.declaredWageType as "MONTHLY" | "DAILY" | "HOURLY") || null,
+        periodsPerMonth,
+      );
 
       // Get wage type and base salary from role scorecard
       // baseSalary meaning depends on wageType:
@@ -943,7 +998,7 @@ async function loadEmployeeInputs(
           employeeId: e.id,
           wageType,
           baseRate: baseSalary, // Rate interpretation depends on wageType
-          payFrequency: "SEMI_MONTHLY" as any, // Default, can be made configurable
+          payFrequency: payFrequency as any,
           standardWorkDaysPerMonth,
           standardHoursPerDay,
           isBenefitsEligible: true, // Default to true, can be made configurable
@@ -988,6 +1043,8 @@ async function loadEmployeeInputs(
           // Use break override if set, otherwise use shift template's break minutes
           const breakMinutes = a.breakMinutesApplied ?? shiftBreakMinutes;
           const isOvernight = a.shiftTemplate?.isOvernight ?? false;
+          const breakStartTime = a.shiftTemplate?.breakStartTime ?? null;
+          const breakEndTime = a.shiftTemplate?.breakEndTime ?? null;
 
           const calc = calculateAttendanceMetrics(
             a.actualTimeIn,
@@ -1002,7 +1059,9 @@ async function loadEmployeeInputs(
             isOvernight,
             a.attendanceDate,
             shiftBreakMinutes,
-            a.breakMinutesApplied
+            a.breakMinutesApplied,
+            breakStartTime,
+            breakEndTime
           );
 
           const workedMinutes = calc.workedMinutes;
@@ -1032,6 +1091,7 @@ async function loadEmployeeInputs(
             // OT/Premium minutes ONLY count if there was actual work rendered
             otEarlyInMinutes: hasActualWork ? calc.otEarlyInMinutes : 0,
             otLateOutMinutes: hasActualWork ? calc.otLateOutMinutes : 0,
+            otBreakMinutes: hasActualWork ? calc.otBreakMinutes : 0,
             overtimeRestDayMinutes,
             overtimeHolidayMinutes,
             nightDiffMinutes: hasActualWork ? calc.nightDiffMinutes : 0,
@@ -1045,6 +1105,8 @@ async function loadEmployeeInputs(
             isOnLeave: a.leaveRequestId !== null,
             leaveIsPaid: a.leaveRequest?.leaveType?.isPaid ?? true,
             leaveHours: a.leaveHours ? Number(a.leaveHours) : undefined,
+            // Daily rate override for this day
+            dailyRateOverride: a.dailyRateOverride ? Number(a.dailyRateOverride) : undefined,
           };
         }) as AttendanceDayInput[],
         manualAdjustments: empAdjustments.map((a) => ({
@@ -1078,6 +1140,8 @@ async function loadEmployeeInputs(
         // When true: Withholding tax uses full taxable earnings
         // When false (default): Withholding tax uses only Basic Pay - Late/Undertime
         taxOnFullEarnings: e.taxOnFullEarnings,
+        // Penalty deductions (auto-loaded from active penalty installments)
+        penaltyDeductions: penaltyByEmployee.get(e.id) || [],
       };
     });
 }
@@ -1091,7 +1155,8 @@ async function loadEmployeeInputsForSelection(
   startDate: Date,
   endDate: Date,
   payrollRunId: string,
-  employeeIds: string[]
+  employeeIds: string[],
+  payFrequency: string
 ): Promise<EmployeePayrollInput[]> {
   // Load specific employees with role scorecards and attendance
   const employees = await prisma.employee.findMany({
@@ -1110,7 +1175,7 @@ async function loadEmployeeInputsForSelection(
         include: {
           holiday: true,
           leaveRequest: { include: { leaveType: true } },
-          shiftTemplate: { select: { startTime: true, endTime: true, breakMinutes: true, isOvernight: true, scheduledWorkMinutes: true } },
+          shiftTemplate: { select: { startTime: true, endTime: true, breakMinutes: true, breakStartTime: true, breakEndTime: true, isOvernight: true, scheduledWorkMinutes: true } },
         },
       },
     },
@@ -1121,7 +1186,29 @@ async function loadEmployeeInputsForSelection(
     where: { payrollRunId, employeeId: { in: employeeIds } },
   });
 
+  // Load pending penalty installments for selected employees
+  const penaltyInstallmentsForSelection = await prisma.penaltyInstallment.findMany({
+    where: {
+      isDeducted: false,
+      penalty: {
+        employeeId: { in: employeeIds },
+        status: "ACTIVE",
+        effectiveDate: { lte: endDate },
+      },
+    },
+    include: {
+      penalty: {
+        include: { penaltyType: { select: { name: true } } },
+      },
+    },
+    orderBy: [
+      { penalty: { effectiveDate: "asc" } },
+      { installmentNumber: "asc" },
+    ],
+  });
+
   // Load YTD from previous payslips in same year
+  // Include BASIC_PAY and LATE_UT_DEDUCTION line items for accurate YTD recalculation
   const year = startDate.getFullYear();
   const ytdPayslips = await prisma.payslip.findMany({
     where: {
@@ -1134,22 +1221,22 @@ async function loadEmployeeInputsForSelection(
         },
       },
     },
-    orderBy: { createdAt: "desc" },
+    include: {
+      lines: {
+        where: { category: { in: ["BASIC_PAY", "LATE_UT_DEDUCTION"] } },
+        select: { category: true, amount: true },
+      },
+    },
+    orderBy: { createdAt: "asc" },
   });
 
-  // Build YTD map (get latest per employee)
-  const ytdMap = new Map<
-    string,
-    { grossPay: number; taxableIncome: number; taxWithheld: number }
-  >();
+  // Group all payslips by employee (not just latest - we recompute YTD from per-period data)
+  const payslipsByEmployee = new Map<string, typeof ytdPayslips>();
   for (const ps of ytdPayslips) {
-    if (!ytdMap.has(ps.employeeId)) {
-      ytdMap.set(ps.employeeId, {
-        grossPay: Number(ps.ytdGrossPay),
-        taxableIncome: Number(ps.ytdTaxableIncome),
-        taxWithheld: Number(ps.ytdTaxWithheld),
-      });
+    if (!payslipsByEmployee.has(ps.employeeId)) {
+      payslipsByEmployee.set(ps.employeeId, []);
     }
+    payslipsByEmployee.get(ps.employeeId)!.push(ps);
   }
 
   // Default rest days: Saturday (6) and Sunday (0)
@@ -1158,17 +1245,38 @@ async function loadEmployeeInputsForSelection(
   // Get calendar events (holidays) for the date range
   const eventMap = await buildEventMap(companyId, startDate, endDate);
 
+  // Build penalty deductions map for selected employees
+  const penaltyByEmployeeSelection = new Map<string, Array<{ installmentId: string; penaltyId: string; description: string; amount: number }>>();
+  const seenPenaltiesSelection = new Set<string>();
+  for (const pi of penaltyInstallmentsForSelection) {
+    const empId = pi.penalty.employeeId;
+    if (seenPenaltiesSelection.has(pi.penaltyId)) continue;
+    seenPenaltiesSelection.add(pi.penaltyId);
+    if (!penaltyByEmployeeSelection.has(empId)) penaltyByEmployeeSelection.set(empId, []);
+    penaltyByEmployeeSelection.get(empId)!.push({
+      installmentId: pi.id,
+      penaltyId: pi.penaltyId,
+      description: `${pi.penalty.penaltyType?.name || pi.penalty.customDescription || "Penalty"} (${pi.installmentNumber}/${pi.penalty.installmentCount})`,
+      amount: Number(pi.amount),
+    });
+  }
+
+  // Compute periodsPerMonth from pay frequency
+  const periodsPerMonth = toPeriodsPerMonth(payFrequency);
+
   // Transform to input format - only include employees with role scorecards
   return employees
     .filter((e) => e.roleScorecard !== null)
     .map((e) => {
       const scorecard = e.roleScorecard!;
       const empAdjustments = adjustments.filter((a) => a.employeeId === e.id);
-      const ytd = ytdMap.get(e.id) || {
-        grossPay: 0,
-        taxableIncome: 0,
-        taxWithheld: 0,
-      };
+      const ytd = computeEmployeeYtd(
+        payslipsByEmployee.get(e.id) || [],
+        e.taxOnFullEarnings,
+        e.declaredWageOverride ? Number(e.declaredWageOverride) : null,
+        (e.declaredWageType as "MONTHLY" | "DAILY" | "HOURLY") || null,
+        periodsPerMonth,
+      );
 
       // Get wage type and base salary from role scorecard
       // baseSalary meaning depends on wageType:
@@ -1185,7 +1293,7 @@ async function loadEmployeeInputsForSelection(
           employeeId: e.id,
           wageType,
           baseRate: baseSalary, // Rate interpretation depends on wageType
-          payFrequency: "SEMI_MONTHLY" as any, // Default, can be made configurable
+          payFrequency: payFrequency as any,
           standardWorkDaysPerMonth,
           standardHoursPerDay,
           isBenefitsEligible: true, // Default to true, can be made configurable
@@ -1230,6 +1338,8 @@ async function loadEmployeeInputsForSelection(
           // Use break override if set, otherwise use shift template's break minutes
           const breakMinutes = a.breakMinutesApplied ?? shiftBreakMinutes;
           const isOvernight = a.shiftTemplate?.isOvernight ?? false;
+          const breakStartTime = a.shiftTemplate?.breakStartTime ?? null;
+          const breakEndTime = a.shiftTemplate?.breakEndTime ?? null;
 
           const calc = calculateAttendanceMetrics(
             a.actualTimeIn,
@@ -1244,7 +1354,9 @@ async function loadEmployeeInputsForSelection(
             isOvernight,
             a.attendanceDate,
             shiftBreakMinutes,
-            a.breakMinutesApplied
+            a.breakMinutesApplied,
+            breakStartTime,
+            breakEndTime
           );
 
           const workedMinutes = calc.workedMinutes;
@@ -1274,6 +1386,7 @@ async function loadEmployeeInputsForSelection(
             // OT/Premium minutes ONLY count if there was actual work rendered
             otEarlyInMinutes: hasActualWork ? calc.otEarlyInMinutes : 0,
             otLateOutMinutes: hasActualWork ? calc.otLateOutMinutes : 0,
+            otBreakMinutes: hasActualWork ? calc.otBreakMinutes : 0,
             overtimeRestDayMinutes,
             overtimeHolidayMinutes,
             nightDiffMinutes: hasActualWork ? calc.nightDiffMinutes : 0,
@@ -1286,6 +1399,8 @@ async function loadEmployeeInputsForSelection(
             isOnLeave: a.leaveRequestId !== null,
             leaveIsPaid: a.leaveRequest?.leaveType?.isPaid ?? true,
             leaveHours: a.leaveHours ? Number(a.leaveHours) : undefined,
+            // Daily rate override for this day
+            dailyRateOverride: a.dailyRateOverride ? Number(a.dailyRateOverride) : undefined,
           };
         }) as AttendanceDayInput[],
         manualAdjustments: empAdjustments.map((a) => ({
@@ -1319,6 +1434,8 @@ async function loadEmployeeInputsForSelection(
         // When true: Withholding tax uses full taxable earnings
         // When false (default): Withholding tax uses only Basic Pay - Late/Undertime
         taxOnFullEarnings: e.taxOnFullEarnings,
+        // Penalty deductions (auto-loaded from active penalty installments)
+        penaltyDeductions: penaltyByEmployeeSelection.get(e.id) || [],
       };
     });
 }
@@ -1405,6 +1522,7 @@ async function savePayslips(
             sortOrder: line.sortOrder,
             attendanceDayRecordId: line.attendanceDayRecordId,
             manualAdjustmentId: line.manualAdjustmentId,
+            penaltyInstallmentId: line.penaltyInstallmentId,
             ruleCode: line.ruleCode,
             ruleDescription: line.ruleDescription,
           })),
@@ -1413,4 +1531,95 @@ async function savePayslips(
     });
     index++;
   }
+}
+
+/** Convert pay frequency string to periods per month. */
+function toPeriodsPerMonth(payFrequency: string): number {
+  switch (payFrequency) {
+    case "MONTHLY":
+      return 1;
+    case "SEMI_MONTHLY":
+      return 2;
+    case "BI_WEEKLY":
+      return 2.17;
+    case "WEEKLY":
+      return 4.33;
+    default:
+      return 2;
+  }
+}
+
+/**
+ * Recompute correct YTD from per-period payslip data.
+ *
+ * Previously, YTD taxable income was stored as a cumulative using grossPay
+ * (all earnings), which inflated YTD for "Basic Pay Only" employees. This
+ * function recomputes each period's taxable income based on the employee's
+ * current tax mode, producing a correct cumulative that self-heals corrupted
+ * historical data.
+ */
+function computeEmployeeYtd(
+  payslips: Array<{
+    grossPay: any;
+    sssEe: any;
+    philhealthEe: any;
+    pagibigEe: any;
+    withholdingTax: any;
+    lines: Array<{ category: string; amount: any }>;
+  }>,
+  taxOnFullEarnings: boolean,
+  declaredWageOverride: number | null,
+  declaredWageType: "MONTHLY" | "DAILY" | "HOURLY" | null,
+  periodsPerMonth: number,
+): { grossPay: number; taxableIncome: number; taxWithheld: number } {
+  if (payslips.length === 0) {
+    return { grossPay: 0, taxableIncome: 0, taxWithheld: 0 };
+  }
+
+  let ytdGrossPay = 0;
+  let ytdTaxable = 0;
+  let ytdTaxWithheld = 0;
+
+  // Precompute override per-period wage if applicable
+  let overridePerPeriod = 0;
+  if (!taxOnFullEarnings && declaredWageOverride && declaredWageType) {
+    const standardWorkDaysPerMonth = 26;
+    const standardHoursPerDay = 8;
+    const overrideMonthly =
+      declaredWageType === "MONTHLY"
+        ? declaredWageOverride
+        : declaredWageType === "DAILY"
+          ? declaredWageOverride * standardWorkDaysPerMonth
+          : declaredWageOverride * standardHoursPerDay * standardWorkDaysPerMonth;
+    overridePerPeriod = overrideMonthly / periodsPerMonth;
+  }
+
+  for (const ps of payslips) {
+    const gross = Number(ps.grossPay);
+    const sss = Number(ps.sssEe);
+    const phil = Number(ps.philhealthEe);
+    const pag = Number(ps.pagibigEe);
+
+    ytdGrossPay += gross;
+    ytdTaxWithheld += Number(ps.withholdingTax);
+
+    if (taxOnFullEarnings) {
+      // Full Earnings mode: taxable = grossPay - statutory deductions
+      ytdTaxable += Math.max(0, gross - sss - phil - pag);
+    } else if (declaredWageOverride && declaredWageType) {
+      // Basic Pay Only + override: use declared wage as tax base
+      ytdTaxable += Math.max(0, overridePerPeriod - sss - phil - pag);
+    } else {
+      // Basic Pay Only + no override: use actual basic pay from line items
+      const basicPay = ps.lines
+        .filter((l) => l.category === "BASIC_PAY")
+        .reduce((sum, l) => sum + Number(l.amount), 0);
+      const lateUt = ps.lines
+        .filter((l) => l.category === "LATE_UT_DEDUCTION")
+        .reduce((sum, l) => sum + Number(l.amount), 0);
+      ytdTaxable += Math.max(0, basicPay - lateUt - sss - phil - pag);
+    }
+  }
+
+  return { grossPay: ytdGrossPay, taxableIncome: ytdTaxable, taxWithheld: ytdTaxWithheld };
 }

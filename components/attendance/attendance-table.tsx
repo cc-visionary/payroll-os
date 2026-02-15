@@ -165,7 +165,7 @@ export function AttendanceTable({
                       (record.otEarlyInMinutes || 0) + (record.otLateOutMinutes || 0) +
                       (record.otRestDayMinutes || 0) + (record.otHolidayMinutes || 0);
 
-                  const otEarlyLate = (record.otEarlyInMinutes || 0) + (record.otLateOutMinutes || 0);
+                  const otEarlyLate = (record.otEarlyInMinutes || 0) + (record.otLateOutMinutes || 0) + (record.otBreakMinutes || record.breakOtMinutes || 0);
                   const otOther = (record.otRestDayMinutes || 0) + (record.otHolidayMinutes || 0);
 
                   // Get attendance status for badge
@@ -186,6 +186,14 @@ export function AttendanceTable({
                       )}
                       <td className="px-4 py-3 whitespace-nowrap text-gray-900">
                         {formatDate(record.date)}
+                        {record.dailyRateOverride != null && record.dailyRateOverride > 0 && (
+                          <span
+                            className="ml-1 inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-700"
+                            title={`Daily rate override: ₱${record.dailyRateOverride.toFixed(2)}`}
+                          >
+                            ₱{record.dailyRateOverride.toFixed(0)}
+                          </span>
+                        )}
                       </td>
                       <td className="px-4 py-3 whitespace-nowrap text-gray-500">
                         {record.dayOfWeek || getDayOfWeek(record.date)}
@@ -241,12 +249,29 @@ export function AttendanceTable({
                           // Payslip-style OT display with pending indicator
                           (otEarlyLate > 0 || otOther > 0) ? (
                             <div className="space-y-0.5">
-                              {otEarlyLate > 0 && (
-                                <span className={record.isOtApproved ? "text-green-600" : "text-yellow-600"}>
-                                  {formatMinutes(otEarlyLate)}
-                                  {!record.isOtApproved && <span className="text-xs ml-1">(pending)</span>}
-                                </span>
-                              )}
+                              {otEarlyLate > 0 && (() => {
+                                const breakOt = record.otBreakMinutes || record.breakOtMinutes || 0;
+                                const approvedOt = (record.earlyInApproved ? (record.otEarlyInMinutes || 0) : 0)
+                                  + (record.lateOutApproved ? (record.otLateOutMinutes || 0) : 0)
+                                  + breakOt;
+                                const pendingOt = (!record.earlyInApproved ? (record.otEarlyInMinutes || 0) : 0)
+                                  + (!record.lateOutApproved ? (record.otLateOutMinutes || 0) : 0);
+                                return (
+                                  <>
+                                    {approvedOt > 0 && (
+                                      <span className="text-green-600 block">
+                                        {formatMinutes(approvedOt)}
+                                      </span>
+                                    )}
+                                    {pendingOt > 0 && (
+                                      <span className="text-yellow-600 block">
+                                        {formatMinutes(pendingOt)}
+                                        <span className="text-xs ml-1">(pending)</span>
+                                      </span>
+                                    )}
+                                  </>
+                                );
+                              })()}
                               {otOther > 0 && (
                                 <span className="text-green-600 block">
                                   {formatMinutes(otOther)} <span className="text-xs text-gray-500">(hol/rd)</span>
@@ -358,10 +383,15 @@ function calculateSummaryFromRecords(records: AttendanceRecord[], variant: strin
       const isSpecialHoliday = r.dayType === "SPECIAL_HOLIDAY" || r.attendanceType === "SPECIAL_HOLIDAY";
       const isOnLeave = r.attendanceType === "ON_LEAVE";
 
-      const otEarlyLate = (r.otEarlyInMinutes || 0) + (r.otLateOutMinutes || 0);
       const otOther = (r.otRestDayMinutes || 0) + (r.otHolidayMinutes || 0);
-      const approvedRegularOt = r.isOtApproved ? otEarlyLate : 0;
-      const pendingOt = r.isOtApproved ? 0 : otEarlyLate;
+      // Split approved/pending OT using independent approval flags
+      // Break OT is always auto-approved (worked through break)
+      const breakOt = r.otBreakMinutes || r.breakOtMinutes || 0;
+      const approvedRegularOt = (r.earlyInApproved ? (r.otEarlyInMinutes || 0) : 0)
+        + (r.lateOutApproved ? (r.otLateOutMinutes || 0) : 0)
+        + breakOt;
+      const pendingOt = (!r.earlyInApproved ? (r.otEarlyInMinutes || 0) : 0)
+        + (!r.lateOutApproved ? (r.otLateOutMinutes || 0) : 0);
 
       return {
         totalDays: acc.totalDays + 1,

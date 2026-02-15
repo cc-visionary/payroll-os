@@ -580,6 +580,65 @@ export async function releasePayroll(payrollRunId: string) {
       },
     });
 
+    // Mark penalty installments as deducted
+    const penaltyPayslipLines = await prisma.payslipLine.findMany({
+      where: {
+        payslip: { payrollRunId },
+        category: "PENALTY_DEDUCTION",
+        penaltyInstallmentId: { not: null },
+      },
+      select: { id: true, penaltyInstallmentId: true },
+    });
+
+    if (penaltyPayslipLines.length > 0) {
+      const affectedPenaltyIds = new Set<string>();
+
+      for (const line of penaltyPayslipLines) {
+        const installment = await prisma.penaltyInstallment.update({
+          where: { id: line.penaltyInstallmentId! },
+          data: {
+            isDeducted: true,
+            deductedAt: new Date(),
+            payrollRunId,
+            payslipLineId: line.id,
+          },
+          select: { penaltyId: true },
+        });
+        affectedPenaltyIds.add(installment.penaltyId);
+      }
+
+      // Check if any penalties are now fully paid
+      for (const penaltyId of affectedPenaltyIds) {
+        const remaining = await prisma.penaltyInstallment.count({
+          where: { penaltyId, isDeducted: false },
+        });
+        if (remaining === 0) {
+          const totalDeducted = await prisma.penaltyInstallment.aggregate({
+            where: { penaltyId, isDeducted: true },
+            _sum: { amount: true },
+          });
+          await prisma.penalty.update({
+            where: { id: penaltyId },
+            data: {
+              status: "COMPLETED",
+              totalDeducted: totalDeducted._sum.amount || 0,
+              completedAt: new Date(),
+            },
+          });
+        } else {
+          // Update running total
+          const totalDeducted = await prisma.penaltyInstallment.aggregate({
+            where: { penaltyId, isDeducted: true },
+            _sum: { amount: true },
+          });
+          await prisma.penalty.update({
+            where: { id: penaltyId },
+            data: { totalDeducted: totalDeducted._sum.amount || 0 },
+          });
+        }
+      }
+    }
+
     await audit.update(
       "PayrollRun",
       payrollRunId,
@@ -2490,6 +2549,8 @@ export interface PayslipAttendanceRecord {
   breakMinutes: number;
   shiftBreakMinutes: number;
   breakMinutesApplied: number | null;
+  // Daily rate override
+  dailyRateOverride: number | null;
 }
 
 export interface ManualAdjustmentItem {
@@ -2638,7 +2699,7 @@ export async function getPayslipDetail(
       include: {
         holiday: { select: { name: true, dayType: true } },
         shiftTemplate: {
-          select: { startTime: true, endTime: true, breakMinutes: true, isOvernight: true, scheduledWorkMinutes: true },
+          select: { startTime: true, endTime: true, breakMinutes: true, breakStartTime: true, breakEndTime: true, isOvernight: true, scheduledWorkMinutes: true },
         },
       },
       orderBy: { attendanceDate: "asc" },
@@ -2783,6 +2844,7 @@ export async function getPayslipDetail(
       let calculatedUndertimeMinutes = 0;
       let calculatedOtEarlyInMinutes = 0;
       let calculatedOtLateOutMinutes = 0;
+      let calculatedOtBreakMinutes = 0;
       let calculatedNightDiffMinutes = 0;
       let calculatedOtRestDayMinutes = 0;
       let calculatedOtHolidayMinutes = 0;
@@ -2791,6 +2853,8 @@ export async function getPayslipDetail(
       const shiftBreakMinutes = a.shiftTemplate?.breakMinutes ?? 60;
       const breakMinutes = a.breakMinutesApplied ?? shiftBreakMinutes;
       const isOvernight = a.shiftTemplate?.isOvernight ?? false;
+      const breakStartTime = a.shiftTemplate?.breakStartTime ?? null;
+      const breakEndTime = a.shiftTemplate?.breakEndTime ?? null;
 
       if (a.actualTimeIn && a.actualTimeOut && startComponents && endComponents) {
         const clockIn = new Date(a.actualTimeIn);
@@ -2806,7 +2870,9 @@ export async function getPayslipDetail(
           a.earlyInApproved,
           a.lateOutApproved,
           shiftBreakMinutes,
-          a.breakMinutesApplied
+          a.breakMinutesApplied,
+          breakStartTime,
+          breakEndTime
         );
 
         // Apply excusal flags (lateInApproved excuses late, earlyOutApproved excuses undertime)
@@ -2814,6 +2880,7 @@ export async function getPayslipDetail(
         calculatedUndertimeMinutes = a.earlyOutApproved ? 0 : calc.undertimeMinutes;
         calculatedOtEarlyInMinutes = calc.otEarlyInMinutes;
         calculatedOtLateOutMinutes = calc.otLateOutMinutes;
+        calculatedOtBreakMinutes = calc.otBreakMinutes;
 
         // Build schedule dates for worked minutes calculation
         const schedStart = setManilaHours(new Date(a.attendanceDate), startComponents.hours, startComponents.minutes);
@@ -2845,11 +2912,11 @@ export async function getPayslipDetail(
         const applyBreak = grossMinutes > 300 ? breakMinutes : 0;
         calculatedWorkedMinutes = Math.max(0, grossMinutes - applyBreak);
 
-        // Calculate night differential (10pm-6am PHT) for actual clock times
-        // Convert UTC times to Philippines time (UTC+8) before calculating ND
+        // Calculate night differential (10pm-6am PHT) for effective (schedule-bounded) clock times
+        // ND only applies to approved work time — unapproved OT outside schedule is excluded
         const PHT_OFFSET_MS = 8 * 60 * 60 * 1000;
-        const clockInPHT = new Date(clockIn.getTime() + PHT_OFFSET_MS);
-        const clockOutPHT = new Date(clockOut.getTime() + PHT_OFFSET_MS);
+        const clockInPHT = new Date(effectiveClockIn.getTime() + PHT_OFFSET_MS);
+        const clockOutPHT = new Date(effectiveClockOut.getTime() + PHT_OFFSET_MS);
         const actualInMin = clockInPHT.getUTCHours() * 60 + clockInPHT.getUTCMinutes();
         const actualOutMin = clockOutPHT.getUTCHours() * 60 + clockOutPHT.getUTCMinutes();
         const nightStart = 22 * 60; // 10pm PHT
@@ -2939,6 +3006,7 @@ export async function getPayslipDetail(
         // OT breakdown (early in + late out requires approval)
         otEarlyInMinutes: calculatedOtEarlyInMinutes,
         otLateOutMinutes: calculatedOtLateOutMinutes,
+        otBreakMinutes: calculatedOtBreakMinutes,
         otRestDayMinutes: calculatedOtRestDayMinutes,
         otHolidayMinutes: calculatedOtHolidayMinutes,
         // OT is considered approved if either earlyIn or lateOut is approved
@@ -2955,6 +3023,8 @@ export async function getPayslipDetail(
         breakMinutes,
         shiftBreakMinutes,
         breakMinutesApplied: a.breakMinutesApplied,
+        // Daily rate override
+        dailyRateOverride: a.dailyRateOverride ? Number(a.dailyRateOverride) : null,
       };
     });
 

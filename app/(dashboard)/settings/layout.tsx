@@ -25,6 +25,16 @@ const settingsNavItems = [
     description: "Define work schedules",
   },
   {
+    href: "/settings/penalty-types",
+    label: "Penalty Types",
+    description: "Configure penalty categories",
+  },
+  {
+    href: "/settings/roles",
+    label: "Roles",
+    description: "Manage roles and permissions",
+  },
+  {
     href: "/settings/company",
     label: "Company Info",
     description: "Company details and branding",

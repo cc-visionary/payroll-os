@@ -967,6 +967,8 @@ export async function generateDetailedPayrollExport(payrollRunId: string): Promi
             startTime: true,
             endTime: true,
             breakMinutes: true,
+            breakStartTime: true,
+            breakEndTime: true,
             isOvernight: true,
           },
         },
@@ -987,7 +989,9 @@ export async function generateDetailedPayrollExport(payrollRunId: string): Promi
       isOvernight: boolean,
       attendanceDate?: Date,
       shiftBreakMinutes?: number,
-      breakMinutesApplied?: number | null
+      breakMinutesApplied?: number | null,
+      breakStartTime?: Date | string | null,
+      breakEndTime?: Date | string | null
     ) => {
       if (!actualTimeIn || !actualTimeOut) {
         return { workedMinutes: 0, lateMinutes: 0, undertimeMinutes: 0, otEarlyInMinutes: 0, otLateOutMinutes: 0, nightDiffMinutes: 0 };
@@ -1007,7 +1011,9 @@ export async function generateDetailedPayrollExport(payrollRunId: string): Promi
         earlyInApproved,
         lateOutApproved,
         shiftBreakMinutes,
-        breakMinutesApplied
+        breakMinutesApplied,
+        breakStartTime,
+        breakEndTime
       );
 
       // Apply excusal flags (lateInApproved excuses late, earlyOutApproved excuses undertime)
@@ -1027,6 +1033,9 @@ export async function generateDetailedPayrollExport(payrollRunId: string): Promi
       const actualOutMin = clockOutPHT.getUTCHours() * 60 + clockOutPHT.getUTCMinutes();
 
       let workedMinutes = 0;
+      // Effective clock times: bounded by schedule unless OT approved (used for ND calc too)
+      let effectiveClockIn = clockIn;
+      let effectiveClockOut = clockOut;
       if (startTime && endTime) {
         // Build schedule times using Manila timezone utility
         const schedStart = setManilaHours(new Date(baseDate), startTime.hours, startTime.minutes);
@@ -1038,9 +1047,6 @@ export async function generateDetailedPayrollExport(payrollRunId: string): Promi
         }
 
         // Calculate effective clock times (schedule-bounded unless OT approved)
-        let effectiveClockIn = clockIn;
-        let effectiveClockOut = clockOut;
-
         if (clockIn < schedStart && !earlyInApproved) {
           effectiveClockIn = schedStart;
         }
@@ -1059,7 +1065,13 @@ export async function generateDetailedPayrollExport(payrollRunId: string): Promi
         workedMinutes = Math.max(0, rawWorked - breakMinutes);
       }
 
-      // Calculate night diff (10pm-6am = 22:00-06:00)
+      // Calculate night diff on effective (schedule-bounded) times (10pm-6am)
+      // ND only applies to approved work time, not unapproved OT
+      const effectiveInPHT = new Date(effectiveClockIn.getTime() + PHT_OFFSET_MS);
+      const effectiveOutPHT = new Date(effectiveClockOut.getTime() + PHT_OFFSET_MS);
+      const effectiveInMin = effectiveInPHT.getUTCHours() * 60 + effectiveInPHT.getUTCMinutes();
+      const effectiveOutMin = effectiveOutPHT.getUTCHours() * 60 + effectiveOutPHT.getUTCMinutes();
+
       let nightDiffMinutes = 0;
       const nightStart = 22 * 60;
       const nightEnd = 6 * 60;
@@ -1069,20 +1081,20 @@ export async function generateDetailedPayrollExport(payrollRunId: string): Promi
         return Math.max(0, overlapEnd - overlapStart);
       };
 
-      if (actualOutMin > actualInMin) {
-        nightDiffMinutes += overlapMinutes(actualInMin, actualOutMin, nightStart, 1440);
-        nightDiffMinutes += overlapMinutes(actualInMin, actualOutMin, 0, nightEnd);
+      if (effectiveOutMin > effectiveInMin) {
+        nightDiffMinutes += overlapMinutes(effectiveInMin, effectiveOutMin, nightStart, 1440);
+        nightDiffMinutes += overlapMinutes(effectiveInMin, effectiveOutMin, 0, nightEnd);
       } else {
-        nightDiffMinutes += overlapMinutes(actualInMin, 1440, nightStart, 1440);
-        nightDiffMinutes += overlapMinutes(0, actualOutMin, 0, nightEnd);
+        nightDiffMinutes += overlapMinutes(effectiveInMin, 1440, nightStart, 1440);
+        nightDiffMinutes += overlapMinutes(0, effectiveOutMin, 0, nightEnd);
       }
 
       return {
         workedMinutes,
         lateMinutes,
         undertimeMinutes,
-        otEarlyInMinutes: calc.otEarlyInMinutes,
-        otLateOutMinutes: calc.otLateOutMinutes,
+        otEarlyInMinutes: earlyInApproved ? calc.otEarlyInMinutes : 0,
+        otLateOutMinutes: lateOutApproved ? calc.otLateOutMinutes : 0,
         nightDiffMinutes,
       };
     };
@@ -1106,6 +1118,8 @@ export async function generateDetailedPayrollExport(payrollRunId: string): Promi
       const isOvernight = rec.shiftTemplate?.isOvernight ?? false;
       const schedStart = rec.shiftTemplate?.startTime ?? null;
       const schedEnd = rec.shiftTemplate?.endTime ?? null;
+      const breakStartTime = rec.shiftTemplate?.breakStartTime ?? null;
+      const breakEndTime = rec.shiftTemplate?.breakEndTime ?? null;
 
       const metrics = calculateMetrics(
         rec.actualTimeIn,
@@ -1120,7 +1134,9 @@ export async function generateDetailedPayrollExport(payrollRunId: string): Promi
         isOvernight,
         rec.attendanceDate,
         shiftBreakMin,
-        rec.breakMinutesApplied
+        rec.breakMinutesApplied,
+        breakStartTime,
+        breakEndTime
       );
 
       const existing = attendanceByEmployee.get(rec.employeeId);
@@ -1710,6 +1726,8 @@ export async function generatePayslipPDFZipExport(payrollRunId: string): Promise
               startTime: true,
               endTime: true,
               breakMinutes: true,
+              breakStartTime: true,
+              breakEndTime: true,
               isOvernight: true,
             },
           },
@@ -1787,10 +1805,12 @@ export async function generatePayslipPDFZipExport(payrollRunId: string): Promise
         dayType: string,
         attendanceDate: Date,
         shiftBreakMinutes?: number,
-        breakMinutesApplied?: number | null
+        breakMinutesApplied?: number | null,
+        breakStartTime?: Date | string | null,
+        breakEndTime?: Date | string | null
       ) => {
         if (!actualTimeIn || !actualTimeOut) {
-          return { workedMinutes: 0, lateMinutes: 0, undertimeMinutes: 0, otEarlyInMinutes: 0, otLateOutMinutes: 0, overtimeRestDayMinutes: 0, overtimeHolidayMinutes: 0, nightDiffMinutes: 0 };
+          return { workedMinutes: 0, lateMinutes: 0, undertimeMinutes: 0, otEarlyInMinutes: 0, otLateOutMinutes: 0, otBreakMinutes: 0, overtimeRestDayMinutes: 0, overtimeHolidayMinutes: 0, nightDiffMinutes: 0 };
         }
 
         const clockIn = new Date(actualTimeIn);
@@ -1806,7 +1826,9 @@ export async function generatePayslipPDFZipExport(payrollRunId: string): Promise
           earlyInApproved,
           lateOutApproved,
           shiftBreakMinutes,
-          breakMinutesApplied
+          breakMinutesApplied,
+          breakStartTime,
+          breakEndTime
         );
 
         // Apply excusal flags
@@ -1826,6 +1848,9 @@ export async function generatePayslipPDFZipExport(payrollRunId: string): Promise
         const actualOutMin = clockOutPHT.getUTCHours() * 60 + clockOutPHT.getUTCMinutes();
 
         let workedMinutes = 0;
+        // Effective clock times: bounded by schedule unless OT approved (used for ND calc too)
+        let effectiveClockIn = clockIn;
+        let effectiveClockOut = clockOut;
         if (startTime && endTime) {
           // Build schedule times using Manila timezone utility
           const schedStart = setManilaHours(new Date(attendanceDate), startTime.hours, startTime.minutes);
@@ -1837,9 +1862,6 @@ export async function generatePayslipPDFZipExport(payrollRunId: string): Promise
           }
 
           // Calculate effective clock times (schedule-bounded unless OT approved)
-          let effectiveClockIn = clockIn;
-          let effectiveClockOut = clockOut;
-
           if (clockIn < schedStart && !earlyInApproved) {
             effectiveClockIn = schedStart;
           }
@@ -1864,7 +1886,13 @@ export async function generatePayslipPDFZipExport(payrollRunId: string): Promise
         const overtimeRestDayMinutes = isRestDay && workedMinutes > 0 ? workedMinutes : 0;
         const overtimeHolidayMinutes = isHoliday && workedMinutes > 0 ? workedMinutes : 0;
 
-        // Calculate night diff (10pm-6am)
+        // Calculate night diff on effective (schedule-bounded) times (10pm-6am)
+        // ND only applies to approved work time, not unapproved OT
+        const effectiveInPHT = new Date(effectiveClockIn.getTime() + PHT_OFFSET_MS);
+        const effectiveOutPHT = new Date(effectiveClockOut.getTime() + PHT_OFFSET_MS);
+        const effectiveInMin = effectiveInPHT.getUTCHours() * 60 + effectiveInPHT.getUTCMinutes();
+        const effectiveOutMin = effectiveOutPHT.getUTCHours() * 60 + effectiveOutPHT.getUTCMinutes();
+
         let nightDiffMinutes = 0;
         const nightStart = 22 * 60;
         const nightEnd = 6 * 60;
@@ -1874,12 +1902,12 @@ export async function generatePayslipPDFZipExport(payrollRunId: string): Promise
           return Math.max(0, overlapEnd - overlapStart);
         };
 
-        if (actualOutMin > actualInMin) {
-          nightDiffMinutes += overlapMinutes(actualInMin, actualOutMin, nightStart, 1440);
-          nightDiffMinutes += overlapMinutes(actualInMin, actualOutMin, 0, nightEnd);
+        if (effectiveOutMin > effectiveInMin) {
+          nightDiffMinutes += overlapMinutes(effectiveInMin, effectiveOutMin, nightStart, 1440);
+          nightDiffMinutes += overlapMinutes(effectiveInMin, effectiveOutMin, 0, nightEnd);
         } else {
-          nightDiffMinutes += overlapMinutes(actualInMin, 1440, nightStart, 1440);
-          nightDiffMinutes += overlapMinutes(0, actualOutMin, 0, nightEnd);
+          nightDiffMinutes += overlapMinutes(effectiveInMin, 1440, nightStart, 1440);
+          nightDiffMinutes += overlapMinutes(0, effectiveOutMin, 0, nightEnd);
         }
 
         return {
@@ -1888,6 +1916,7 @@ export async function generatePayslipPDFZipExport(payrollRunId: string): Promise
           undertimeMinutes,
           otEarlyInMinutes: calc.otEarlyInMinutes,
           otLateOutMinutes: calc.otLateOutMinutes,
+          otBreakMinutes: calc.otBreakMinutes,
           overtimeRestDayMinutes,
           overtimeHolidayMinutes,
           nightDiffMinutes,
@@ -1901,6 +1930,8 @@ export async function generatePayslipPDFZipExport(payrollRunId: string): Promise
         const isOvernight = record.shiftTemplate?.isOvernight ?? false;
         const schedStart = record.shiftTemplate?.startTime ?? null;
         const schedEnd = record.shiftTemplate?.endTime ?? null;
+        const breakStartTime = record.shiftTemplate?.breakStartTime ?? null;
+        const breakEndTime = record.shiftTemplate?.breakEndTime ?? null;
 
         const calc = calcMetricsForPdf(
           record.actualTimeIn,
@@ -1916,7 +1947,9 @@ export async function generatePayslipPDFZipExport(payrollRunId: string): Promise
           record.dayType,
           record.attendanceDate,
           shiftBreakMin,
-          record.breakMinutesApplied
+          record.breakMinutesApplied,
+          breakStartTime,
+          breakEndTime
         );
 
         return { record, calc };
@@ -2060,6 +2093,7 @@ export async function generatePayslipPDFZipExport(payrollRunId: string): Promise
           otEarlyInMinutes: record.earlyInApproved ? calc.otEarlyInMinutes : 0,
           otLateOutMinutes: record.lateOutApproved ? calc.otLateOutMinutes : 0,
           otRestDayMinutes: calc.overtimeRestDayMinutes,
+          otBreakMinutes: calc.otBreakMinutes,
           otHolidayMinutes: calc.overtimeHolidayMinutes,
           ndMinutes: calc.nightDiffMinutes,
           // OT approval flags

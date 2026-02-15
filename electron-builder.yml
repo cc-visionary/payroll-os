@@ -1,7 +1,9 @@
 # =============================================================================
 # PeopleOS PH - Electron Builder Configuration
 # =============================================================================
-# Configuration for building desktop installers for Windows, macOS, and Linux.
+# Electron code goes inside app.asar (files).
+# Next.js server payload goes to extraResources (real filesystem) because
+# the spawned child node.exe cannot read from inside asar archives.
 # =============================================================================
 
 appId: com.peopleos.payroll
@@ -12,15 +14,12 @@ directories:
   output: dist
   buildResources: resources
 
-# Files to include in the build
+# ─── Files included in app.asar ──────────────────────────────────────────────
+# ONLY Electron main-process code and its direct dependencies.
 files:
-  - .next/standalone/**/*
-  - .next/static/**/*
-  - public/**/*
   - dist-electron/**/*
   - package.json
-  - .env
-  # Include electron-updater and all its dependencies for auto-updates
+  # electron-updater and all its dependencies (required by main process for auto-updates)
   - node_modules/electron-updater/**/*
   - node_modules/builder-util-runtime/**/*
   - node_modules/argparse/**/*
@@ -37,27 +36,29 @@ files:
   - node_modules/semver/**/*
   - node_modules/tiny-typed-emitter/**/*
   - node_modules/universalify/**/*
-  # Exclude build artifacts and unnecessary files
-  - "!.next/standalone/dist/**"
-  - "!.next/standalone/.next/cache/**"
+  # Exclude unnecessary files from asar
   - "!**/node_modules/.cache/**"
   - "!**/*.map"
 
-# Extra resources (Prisma, Node.js runtime, etc.)
+# ─── Extra resources (outside asar, on real filesystem) ──────────────────────
 extraResources:
-  - from: prisma
-    to: prisma
+  # Next.js standalone payload
+  - from: resources/payload
+    to: payload
     filter:
-      - "schema.prisma"
-      - "migrations/**/*"
-  # Node.js runtime for running the Next.js server
-  # Downloaded during build process
+      - "**/*"
+  # WORKAROUND: Explicitly copy node_modules — electron-builder
+  # strips node_modules by default even from extraResources
+  - from: resources/payload/node_modules
+    to: payload/node_modules
+    filter:
+      - "**/*"
+  # Node.js runtime (downloaded during CI)
   - from: node-runtime
     to: node-runtime
     filter:
       - "**/*"
 
-# Use asar for packaging (security)
 asar: true
 
 # =============================================================================
@@ -79,43 +80,8 @@ nsis:
   shortcutName: PeopleOS Payroll
 
 # =============================================================================
-# macOS Configuration
+# Auto-updater Configuration (GitHub Releases)
 # =============================================================================
-mac:
-  target:
-    - target: dmg
-      arch:
-        - x64
-        - arm64
-  category: public.app-category.business
-  icon: resources/icons/people.png
-  artifactName: ${productName}-${version}-${arch}.${ext}
-
-dmg:
-  contents:
-    - x: 130
-      y: 220
-    - x: 410
-      y: 220
-      type: link
-      path: /Applications
-
-# =============================================================================
-# Linux Configuration
-# =============================================================================
-linux:
-  target:
-    - target: AppImage
-      arch:
-        - x64
-  category: Office
-  icon: resources/icons/people.png
-  artifactName: ${productName}-${version}.${ext}
-
-# =============================================================================
-# Auto-updater Configuration
-# =============================================================================
-# Configure for GitHub releases
 publish:
   provider: github
   owner: cc-visionary

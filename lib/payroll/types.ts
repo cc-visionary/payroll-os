@@ -56,7 +56,8 @@ export type PayslipLineCategory =
   | "CASH_ADVANCE_DEDUCTION"
   | "LOAN_DEDUCTION"
   | "ADJUSTMENT_DEDUCT"
-  | "OTHER_DEDUCTION";
+  | "OTHER_DEDUCTION"
+  | "PENALTY_DEDUCTION";
 
 /**
  * Pay profile snapshot for computation.
@@ -104,6 +105,7 @@ export interface AttendanceDayInput {
   // Rest day/holiday OT is auto-approved
   otEarlyInMinutes: number;
   otLateOutMinutes: number;
+  otBreakMinutes: number;
   overtimeRestDayMinutes: number;
   overtimeHolidayMinutes: number;
 
@@ -123,6 +125,10 @@ export interface AttendanceDayInput {
   isOnLeave: boolean;
   leaveIsPaid: boolean;
   leaveHours?: number;
+
+  // Daily rate override (undefined = use standard rate from pay profile)
+  // When set, all derived rates for this day are recalculated from this daily rate
+  dailyRateOverride?: number;
 }
 
 /**
@@ -140,6 +146,7 @@ export interface ComputedPayslipLine {
   // Source traceability
   attendanceDayRecordId?: string;
   manualAdjustmentId?: string;
+  penaltyInstallmentId?: string;
 
   // Rule traceability
   ruleCode?: string;

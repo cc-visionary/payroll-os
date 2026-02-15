@@ -420,7 +420,7 @@ describe("Break Override - OT Calculations", () => {
       // Employee clocks out at 7PM (1 hour past schedule) with no break taken
       // Total work: 10 hours, Expected: 8 hours, OT = 2 hours (120 min)
       // - 60 min from late clock out (7PM - 6PM)
-      // - 60 min from working through break
+      // - 60 min from working through break (auto-approved, separate field)
       const result = calculateAttendanceTimes(
         manilaTime("2026-01-26", 9, 0),   // Clock in 9:00 AM
         manilaTime("2026-01-26", 19, 0),  // Clock out 7:00 PM (1 hour late)
@@ -433,7 +433,8 @@ describe("Break Override - OT Calculations", () => {
         0      // breakMinutesApplied (no break)
       );
 
-      expect(result.otLateOutMinutes).toBe(120); // 60 late out + 60 break worked
+      expect(result.otLateOutMinutes).toBe(60); // 60 min late out only
+      expect(result.otBreakMinutes).toBe(60);   // 60 min break worked (auto-approved)
       expect(result.undertimeMinutes).toBe(0);
     });
 
@@ -454,6 +455,7 @@ describe("Break Override - OT Calculations", () => {
       );
 
       expect(result.otLateOutMinutes).toBe(60); // Only 60 min late out
+      expect(result.otBreakMinutes).toBe(0);    // No break OT (normal break taken)
       expect(result.undertimeMinutes).toBe(0);
     });
 
@@ -475,15 +477,15 @@ describe("Break Override - OT Calculations", () => {
         0      // breakMinutesApplied (no break)
       );
 
-      expect(result.otLateOutMinutes).toBe(60); // 60 min from working through break
+      expect(result.otLateOutMinutes).toBe(0);  // No late out (clocked out on time)
+      expect(result.otBreakMinutes).toBe(60);    // 60 min from working through break (auto-approved)
       expect(result.undertimeMinutes).toBe(0);
     });
 
-    test("Late clock out NOT approved with no break = only break OT counts", () => {
+    test("Late clock out NOT approved with no break = separate OT fields", () => {
       // Schedule: 9AM-6PM with 60 min break = 8 hours expected work
       // Employee clocks out at 7PM (1 hour past schedule) with no break
-      // lateOutApproved = false, so the 1 hour past schedule doesn't count
-      // But the 1 hour from working through break DOES count
+      // Late-out OT (60 min) needs approval; break OT (60 min) is auto-approved
       const result = calculateAttendanceTimes(
         manilaTime("2026-01-26", 9, 0),   // Clock in 9:00 AM
         manilaTime("2026-01-26", 19, 0),  // Clock out 7:00 PM (1 hour late)
@@ -496,15 +498,15 @@ describe("Break Override - OT Calculations", () => {
         0      // breakMinutesApplied (no break)
       );
 
-      // Only 60 min from break (not the 60 min past schedule end)
-      expect(result.otLateOutMinutes).toBe(60);
+      expect(result.otLateOutMinutes).toBe(60); // 60 min past schedule (needs approval)
+      expect(result.otBreakMinutes).toBe(60);   // 60 min from break (auto-approved)
       expect(result.undertimeMinutes).toBe(0);
     });
 
-    test("Late clock out NOT approved with normal break = no OT", () => {
+    test("Late clock out NOT approved with normal break = OT computed for display", () => {
       // Schedule: 9AM-6PM with 60 min break = 8 hours expected work
       // Employee clocks out at 7PM (1 hour past schedule) with normal break
-      // lateOutApproved = false, so no OT
+      // Late-out OT (60 min) needs approval; no break OT (normal break taken)
       const result = calculateAttendanceTimes(
         manilaTime("2026-01-26", 9, 0),   // Clock in 9:00 AM
         manilaTime("2026-01-26", 19, 0),  // Clock out 7:00 PM (1 hour late)
@@ -517,8 +519,8 @@ describe("Break Override - OT Calculations", () => {
         60     // breakMinutesApplied (normal break)
       );
 
-      // No OT because lateOutApproved is false and no break adjustment
-      expect(result.otLateOutMinutes).toBe(0);
+      expect(result.otLateOutMinutes).toBe(60); // 60 min past schedule (needs approval)
+      expect(result.otBreakMinutes).toBe(0);    // No break OT (normal break taken)
       expect(result.undertimeMinutes).toBe(0);
     });
   });
@@ -576,5 +578,320 @@ describe("Real-world scenarios from user data", () => {
     expect(result.lateMinutes).toBe(9);
     // 5 hours early = 300 min, with 60 min break adjustment = 240 min undertime
     expect(result.undertimeMinutes).toBe(240);
+  });
+});
+
+// =============================================================================
+// Break Window Exclusion Tests
+// =============================================================================
+
+describe("Break Window Exclusion from Late", () => {
+  const manilaTime = (dateStr: string, hours: number, minutes: number): Date => {
+    const date = new Date(dateStr);
+    return setManilaHours(date, hours, minutes);
+  };
+
+  const scheduleTime = (hours: number, minutes: number): Date => {
+    return new Date(`1970-01-01T${hours.toString().padStart(2, "0")}:${minutes.toString().padStart(2, "0")}:00.000Z`);
+  };
+
+  const shiftBreakMinutes = 60;
+  const breakMinutesApplied = null;
+  const breakStart = scheduleTime(13, 0); // 1:00 PM
+  const breakEnd = scheduleTime(14, 0);   // 2:00 PM
+
+  test("Bug fix: Clock in at 14:05, schedule 09:30-18:30, break 13:00-14:00 = 215 min late (not 275)", () => {
+    const result = calculateAttendanceTimes(
+      manilaTime("2026-01-15", 14, 5),
+      manilaTime("2026-01-15", 18, 36),
+      scheduleTime(9, 30),
+      scheduleTime(18, 30),
+      new Date("2026-01-15"),
+      false, false,
+      shiftBreakMinutes,
+      breakMinutesApplied,
+      breakStart,
+      breakEnd
+    );
+
+    // Late period: [09:30, 14:05], Break: [13:00, 14:00], Overlap: 60 min
+    // Late = 275 - 60 = 215
+    expect(result.lateMinutes).toBe(215);
+  });
+
+  test("Clock in at 10:00 (before break) = 30 min late, no break exclusion", () => {
+    const result = calculateAttendanceTimes(
+      manilaTime("2026-01-15", 10, 0),
+      manilaTime("2026-01-15", 18, 30),
+      scheduleTime(9, 30),
+      scheduleTime(18, 30),
+      new Date("2026-01-15"),
+      false, false,
+      shiftBreakMinutes,
+      breakMinutesApplied,
+      breakStart,
+      breakEnd
+    );
+
+    // Late period: [09:30, 10:00], Break: [13:00, 14:00], Overlap: 0
+    expect(result.lateMinutes).toBe(30);
+  });
+
+  test("Clock in at 13:30 (during break) = partial break exclusion", () => {
+    const result = calculateAttendanceTimes(
+      manilaTime("2026-01-15", 13, 30),
+      manilaTime("2026-01-15", 18, 0),
+      scheduleTime(9, 0),
+      scheduleTime(18, 0),
+      new Date("2026-01-15"),
+      false, false,
+      shiftBreakMinutes,
+      breakMinutesApplied,
+      breakStart,
+      breakEnd
+    );
+
+    // Late period: [09:00, 13:30], Break: [13:00, 14:00], Overlap: 30 min
+    // Late = 270 - 30 = 240
+    expect(result.lateMinutes).toBe(240);
+  });
+
+  test("No break window provided = old behavior (no exclusion)", () => {
+    const result = calculateAttendanceTimes(
+      manilaTime("2026-01-15", 14, 5),
+      manilaTime("2026-01-15", 18, 36),
+      scheduleTime(9, 30),
+      scheduleTime(18, 30),
+      new Date("2026-01-15"),
+      false, false,
+      shiftBreakMinutes,
+      breakMinutesApplied
+      // No breakStart/breakEnd passed
+    );
+
+    // Without break window info, late = 275 (old behavior)
+    expect(result.lateMinutes).toBe(275);
+  });
+
+  test("Clock in at exactly break end = full break excluded", () => {
+    const result = calculateAttendanceTimes(
+      manilaTime("2026-01-15", 14, 0),
+      manilaTime("2026-01-15", 18, 0),
+      scheduleTime(9, 0),
+      scheduleTime(18, 0),
+      new Date("2026-01-15"),
+      false, false,
+      shiftBreakMinutes,
+      breakMinutesApplied,
+      breakStart,
+      breakEnd
+    );
+
+    // Late period: [09:00, 14:00], Break: [13:00, 14:00], Overlap: 60 min
+    // Late = 300 - 60 = 240
+    expect(result.lateMinutes).toBe(240);
+  });
+});
+
+describe("Break Window Exclusion from Undertime", () => {
+  const manilaTime = (dateStr: string, hours: number, minutes: number): Date => {
+    const date = new Date(dateStr);
+    return setManilaHours(date, hours, minutes);
+  };
+
+  const scheduleTime = (hours: number, minutes: number): Date => {
+    return new Date(`1970-01-01T${hours.toString().padStart(2, "0")}:${minutes.toString().padStart(2, "0")}:00.000Z`);
+  };
+
+  const shiftBreakMinutes = 60;
+  const breakMinutesApplied = null;
+  const breakStart = scheduleTime(13, 0);
+  const breakEnd = scheduleTime(14, 0);
+
+  test("Bug fix: Clock out at 13:06 (during break) = 240 min undertime (not 294)", () => {
+    const result = calculateAttendanceTimes(
+      manilaTime("2026-01-26", 9, 0),
+      manilaTime("2026-01-26", 13, 6),
+      scheduleTime(9, 0),
+      scheduleTime(18, 0),
+      new Date("2026-01-26"),
+      false, false,
+      shiftBreakMinutes,
+      breakMinutesApplied,
+      breakStart,
+      breakEnd
+    );
+
+    // Undertime period: [13:06, 18:00] = 294 min
+    // Break overlap: [13:06, 14:00] = 54 min
+    // Undertime = 294 - 54 = 240
+    expect(result.undertimeMinutes).toBe(240);
+  });
+
+  test("Clock out at 12:00 (before break) = full break excluded from undertime", () => {
+    const result = calculateAttendanceTimes(
+      manilaTime("2026-01-26", 9, 0),
+      manilaTime("2026-01-26", 12, 0),
+      scheduleTime(9, 0),
+      scheduleTime(18, 0),
+      new Date("2026-01-26"),
+      false, false,
+      shiftBreakMinutes,
+      breakMinutesApplied,
+      breakStart,
+      breakEnd
+    );
+
+    // Undertime period: [12:00, 18:00] = 360 min
+    // Break overlap: [13:00, 14:00] = 60 min
+    // Undertime = 360 - 60 = 300
+    expect(result.undertimeMinutes).toBe(300);
+  });
+
+  test("Clock out at 15:00 (after break) = no break overlap in undertime", () => {
+    const result = calculateAttendanceTimes(
+      manilaTime("2026-01-26", 9, 0),
+      manilaTime("2026-01-26", 15, 0),
+      scheduleTime(9, 0),
+      scheduleTime(18, 0),
+      new Date("2026-01-26"),
+      false, false,
+      shiftBreakMinutes,
+      breakMinutesApplied,
+      breakStart,
+      breakEnd
+    );
+
+    // Undertime period: [15:00, 18:00] = 180 min
+    // Break overlap: 0 (break 13:00-14:00 fully before clock out)
+    expect(result.undertimeMinutes).toBe(180);
+  });
+
+  test("Clock out at 17:00 = 60 min undertime, no break overlap", () => {
+    const result = calculateAttendanceTimes(
+      manilaTime("2026-01-26", 9, 0),
+      manilaTime("2026-01-26", 17, 0),
+      scheduleTime(9, 0),
+      scheduleTime(18, 0),
+      new Date("2026-01-26"),
+      false, false,
+      shiftBreakMinutes,
+      breakMinutesApplied,
+      breakStart,
+      breakEnd
+    );
+
+    expect(result.undertimeMinutes).toBe(60);
+  });
+
+  test("No break window provided = old behavior (no exclusion)", () => {
+    const result = calculateAttendanceTimes(
+      manilaTime("2026-01-26", 9, 0),
+      manilaTime("2026-01-26", 13, 6),
+      scheduleTime(9, 0),
+      scheduleTime(18, 0),
+      new Date("2026-01-26"),
+      false, false,
+      shiftBreakMinutes,
+      breakMinutesApplied
+      // No breakStart/breakEnd passed
+    );
+
+    // Without break window info, undertime = 294 (old behavior)
+    expect(result.undertimeMinutes).toBe(294);
+  });
+});
+
+describe("Break Window Exclusion + Break Override Interaction", () => {
+  const manilaTime = (dateStr: string, hours: number, minutes: number): Date => {
+    const date = new Date(dateStr);
+    return setManilaHours(date, hours, minutes);
+  };
+
+  const scheduleTime = (hours: number, minutes: number): Date => {
+    return new Date(`1970-01-01T${hours.toString().padStart(2, "0")}:${minutes.toString().padStart(2, "0")}:00.000Z`);
+  };
+
+  const breakStart = scheduleTime(13, 0);
+  const breakEnd = scheduleTime(14, 0);
+
+  test("Leave at 5PM, break overridden to 0: overlap=0, adjustment=60 => undertime=0", () => {
+    const result = calculateAttendanceTimes(
+      manilaTime("2026-01-26", 9, 0),
+      manilaTime("2026-01-26", 17, 0),
+      scheduleTime(9, 0),
+      scheduleTime(18, 0),
+      new Date("2026-01-26"),
+      false, false,
+      60,   // shiftBreakMinutes
+      0,    // breakMinutesApplied (override to 0)
+      breakStart,
+      breakEnd
+    );
+
+    // Undertime = [17:00, 18:00] = 60 min
+    // Break overlap: 0 (break already passed)
+    // breakAdj = 60; effectiveAdj = max(0, 60-0) = 60
+    // Final: 60 - 0 - 60 = 0
+    expect(result.undertimeMinutes).toBe(0);
+  });
+
+  test("Leave at 1:06 during break, no override: overlap=54, adj=0 => undertime=240", () => {
+    const result = calculateAttendanceTimes(
+      manilaTime("2026-01-26", 9, 0),
+      manilaTime("2026-01-26", 13, 6),
+      scheduleTime(9, 0),
+      scheduleTime(18, 0),
+      new Date("2026-01-26"),
+      false, false,
+      60,
+      null,  // No override
+      breakStart,
+      breakEnd
+    );
+
+    // Undertime = 294, overlap = 54, adj = 0
+    // Final: 294 - 54 = 240
+    expect(result.undertimeMinutes).toBe(240);
+  });
+
+  test("Leave at 12:30, break overridden to 0: overlap=60, adj reduced => undertime=210", () => {
+    const result = calculateAttendanceTimes(
+      manilaTime("2026-01-26", 9, 0),
+      manilaTime("2026-01-26", 12, 30),
+      scheduleTime(9, 0),
+      scheduleTime(18, 0),
+      new Date("2026-01-26"),
+      false, false,
+      60,
+      0,    // breakMinutesApplied override to 0
+      breakStart,
+      breakEnd
+    );
+
+    // Undertime = 330, overlap = 60
+    // After overlap: 330 - 60 = 270
+    // breakAdj = 60, effectiveAdj = max(0, 60-60) = 0
+    // Final: 270 - 0 = 270
+    expect(result.undertimeMinutes).toBe(270);
+  });
+
+  test("Clock in at 14:05, break overridden to 0: late still excludes break window", () => {
+    const result = calculateAttendanceTimes(
+      manilaTime("2026-01-15", 14, 5),
+      manilaTime("2026-01-15", 18, 30),
+      scheduleTime(9, 30),
+      scheduleTime(18, 30),
+      new Date("2026-01-15"),
+      false, false,
+      60,
+      0,    // breakMinutesApplied override to 0
+      breakStart,
+      breakEnd
+    );
+
+    // Late period: [09:30, 14:05], Break overlap: 60 min
+    // Late = 275 - 60 = 215 (break window overlap is independent of override)
+    expect(result.lateMinutes).toBe(215);
   });
 });

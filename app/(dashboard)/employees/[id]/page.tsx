@@ -26,7 +26,9 @@ import { EventsTab } from "./tabs/events-tab";
 import { DocumentsTab } from "./tabs/documents-tab";
 import { AttendanceTab } from "./tabs/attendance-tab";
 import { PayslipTab } from "./tabs/payslip-tab";
+import { PenaltiesTab } from "./tabs/penalties-tab";
 import { EmployeeDeleteButton } from "../employee-delete-button";
+import { getEmployeePenalties, getPenaltyTypes } from "@/app/actions/penalties";
 
 interface PageProps {
   params: Promise<{ id: string }>;
@@ -39,13 +41,14 @@ export default async function EmployeeDetailPage({ params }: PageProps) {
   const canViewSensitive = await checkPermission(Permission.EMPLOYEE_VIEW_SENSITIVE);
   const canGenerateDocuments = await checkPermission(Permission.DOCUMENT_GENERATE);
   const canEditAttendance = await checkPermission(Permission.ATTENDANCE_EDIT);
+  const canManagePenalties = await checkPermission(Permission.PENALTY_MANAGE);
 
   // Check SUPER_ADMIN role for wage override feature
   const isSuperAdmin = auth.user.roles.includes("SUPER_ADMIN");
 
   const { id } = await params;
 
-  const [employee, events, documents, allEmployees, roleScorecards, currentRoleScorecard, roleHistory, availableRoles, payslips] = await Promise.all([
+  const [employee, events, documents, allEmployees, roleScorecards, currentRoleScorecard, roleHistory, availableRoles, payslips, penalties, penaltyTypes] = await Promise.all([
     getEmployee(id),
     getEmployeeEvents(id),
     getEmployeeDocuments(id),
@@ -55,6 +58,8 @@ export default async function EmployeeDetailPage({ params }: PageProps) {
     getEmployeeRoleHistory(id),
     getAvailableRoles(),
     getEmployeePayslips(id),
+    getEmployeePenalties(id).catch(() => []),
+    getPenaltyTypes().catch(() => []),
   ]);
 
   if (!employee) {
@@ -153,6 +158,7 @@ export default async function EmployeeDetailPage({ params }: PageProps) {
           <TabsTrigger value="attendance">Attendance</TabsTrigger>
           <TabsTrigger value="payslips">Payslips</TabsTrigger>
           <TabsTrigger value="role">Role & Responsibilities</TabsTrigger>
+          <TabsTrigger value="penalties">Penalties</TabsTrigger>
           <TabsTrigger value="events">Employment Events</TabsTrigger>
           <TabsTrigger value="documents">Documents</TabsTrigger>
         </TabsList>
@@ -183,6 +189,15 @@ export default async function EmployeeDetailPage({ params }: PageProps) {
             roleHistory={roleHistory}
             availableRoles={availableRoles}
             canEdit={canEdit}
+          />
+        </TabsContent>
+
+        <TabsContent value="penalties">
+          <PenaltiesTab
+            employeeId={employee.id}
+            penalties={penalties}
+            penaltyTypes={penaltyTypes}
+            canManage={canManagePenalties}
           />
         </TabsContent>
 

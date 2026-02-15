@@ -82,6 +82,40 @@ export function calculateDerivedRates(profile: PayProfileInput): DerivedRates {
 }
 
 /**
+ * Get derived rates for a specific day, optionally using an override daily rate.
+ *
+ * If overrideDailyRate is provided, all rates are re-derived from that daily rate.
+ * Otherwise returns the standard rates unchanged.
+ * MSC is NOT recalculated — statutory contributions always use the standard rate.
+ *
+ * @param standardRates Standard derived rates from pay profile
+ * @param standardHoursPerDay Hours per day (typically 8)
+ * @param overrideDailyRate Optional override daily rate for this day
+ * @returns Derived rates for this day
+ */
+export function getDayRates(
+  standardRates: DerivedRates,
+  standardHoursPerDay: number,
+  overrideDailyRate?: number
+): DerivedRates {
+  if (overrideDailyRate === undefined || overrideDailyRate === null) {
+    return standardRates;
+  }
+
+  const dailyRate = round(overrideDailyRate, 4);
+  const hourlyRate = round(dailyRate / standardHoursPerDay, 4);
+  const minuteRate = round(hourlyRate / 60, 6);
+
+  return {
+    monthlyRate: standardRates.monthlyRate, // Not used for per-day calculations
+    dailyRate,
+    hourlyRate,
+    minuteRate,
+    msc: standardRates.msc, // Statutory stays on standard rates
+  };
+}
+
+/**
  * Calculate basic pay for a pay period.
  *
  * ALL employees (monthly, daily, hourly) are paid based on days present:

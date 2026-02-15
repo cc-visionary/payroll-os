@@ -313,6 +313,16 @@ export function extractTimeComponents(
 }
 
 /**
+ * Calculate overlap in minutes between two time intervals [a, b] and [c, d].
+ * Returns 0 if no overlap.
+ */
+function intervalOverlapMinutes(a: Date, b: Date, c: Date, d: Date): number {
+  const overlapStart = Math.max(a.getTime(), c.getTime());
+  const overlapEnd = Math.min(b.getTime(), d.getTime());
+  return Math.max(0, Math.round((overlapEnd - overlapStart) / (1000 * 60)));
+}
+
+/**
  * Result of attendance time calculations
  */
 export interface AttendanceTimeCalc {
@@ -320,6 +330,7 @@ export interface AttendanceTimeCalc {
   undertimeMinutes: number;
   otEarlyInMinutes: number;
   otLateOutMinutes: number;
+  otBreakMinutes: number;
 }
 
 /**
@@ -348,13 +359,17 @@ export function calculateAttendanceTimes(
   lateOutApproved: boolean,
   // Break override info - when break is reduced/removed, adjust schedule accordingly
   shiftBreakMinutes?: number,
-  breakMinutesApplied?: number | null
+  breakMinutesApplied?: number | null,
+  // Break window times for excluding break from late/undertime overlap
+  breakStartTime?: Date | string | null,
+  breakEndTime?: Date | string | null
 ): AttendanceTimeCalc {
   const result: AttendanceTimeCalc = {
     lateMinutes: 0,
     undertimeMinutes: 0,
     otEarlyInMinutes: 0,
     otLateOutMinutes: 0,
+    otBreakMinutes: 0,
   };
 
   // Need all inputs to calculate
@@ -391,6 +406,30 @@ export function calculateAttendanceTimes(
     schedEnd.setUTCDate(schedEnd.getUTCDate() + 1);
   }
 
+  // Build break window datetimes (if break start/end times are available)
+  let breakStart: Date | null = null;
+  let breakEnd: Date | null = null;
+  if (breakStartTime && breakEndTime) {
+    const breakStartComponents = extractTimeComponents(breakStartTime);
+    const breakEndComponents = extractTimeComponents(breakEndTime);
+    if (breakStartComponents && breakEndComponents) {
+      breakStart = setManilaHours(
+        new Date(attendanceDate),
+        breakStartComponents.hours,
+        breakStartComponents.minutes
+      );
+      breakEnd = setManilaHours(
+        new Date(attendanceDate),
+        breakEndComponents.hours,
+        breakEndComponents.minutes
+      );
+      // Handle overnight break (unlikely but defensive)
+      if (breakEndComponents.hours < breakStartComponents.hours) {
+        breakEnd.setUTCDate(breakEnd.getUTCDate() + 1);
+      }
+    }
+  }
+
   // Calculate break adjustment - if break is reduced/removed, the effective schedule changes
   // e.g., 9AM-6PM with 60min break = 8 hours expected work
   // If break = 0, leaving at 5PM still completes 8 hours of work (no undertime)
@@ -401,16 +440,20 @@ export function calculateAttendanceTimes(
   }
 
   // Calculate late (clock in after schedule start)
-  // NOTE: Break adjustment should NOT be applied to late minutes.
-  // Being late in the morning has nothing to do with whether lunch break was taken.
-  // Break adjustment only applies to undertime (leaving early).
+  // Break window overlap is excluded - if the break falls within the late period,
+  // those minutes shouldn't count as late (e.g., arriving at 2:05 PM with 1-2 PM break)
   if (clockIn > schedStart) {
-    const lateMinutes = Math.round(
+    let lateMinutes = Math.round(
       (clockIn.getTime() - schedStart.getTime()) / (1000 * 60)
     );
+    // Exclude break window overlap from late period [schedStart, clockIn]
+    if (breakStart && breakEnd) {
+      const breakOverlap = intervalOverlapMinutes(schedStart, clockIn, breakStart, breakEnd);
+      lateMinutes = Math.max(0, lateMinutes - breakOverlap);
+    }
     result.lateMinutes = lateMinutes;
-  } else if (clockIn < schedStart && earlyInApproved) {
-    // Early In OT (only if approved)
+  } else if (clockIn < schedStart) {
+    // Early In OT (always computed; approval gated at pay calculation level)
     result.otEarlyInMinutes = Math.round(
       (schedStart.getTime() - clockIn.getTime()) / (1000 * 60)
     );
@@ -421,35 +464,35 @@ export function calculateAttendanceTimes(
     let undertimeMinutes = Math.round(
       (schedEnd.getTime() - clockOut.getTime()) / (1000 * 60)
     );
-    // If break was reduced/removed, reduce undertime by that amount
-    // (because schedule window included break time that's no longer applicable)
+    // Exclude break window overlap from undertime period [clockOut, schedEnd]
+    // e.g., leaving at 1:06 PM with 1-2 PM break: 54 min of break is in undertime period
+    let breakOverlapInUndertime = 0;
+    if (breakStart && breakEnd) {
+      breakOverlapInUndertime = intervalOverlapMinutes(clockOut, schedEnd, breakStart, breakEnd);
+      undertimeMinutes = Math.max(0, undertimeMinutes - breakOverlapInUndertime);
+    }
+    // If break was reduced/removed, reduce undertime by remaining adjustment
+    // (reduced by overlap already subtracted to prevent double-counting)
     if (breakAdjustmentMinutes > 0) {
-      undertimeMinutes = Math.max(0, undertimeMinutes - breakAdjustmentMinutes);
+      const effectiveBreakAdjustment = Math.max(0, breakAdjustmentMinutes - breakOverlapInUndertime);
+      undertimeMinutes = Math.max(0, undertimeMinutes - effectiveBreakAdjustment);
     }
     result.undertimeMinutes = undertimeMinutes;
   } else if (clockOut >= schedEnd) {
-    // Late Out OT calculation has two components:
-    // 1. Time past schedule end (requires lateOutApproved)
-    // 2. Worked break time (counts automatically when break is reduced)
-    let otMinutes = 0;
-
-    // Component 1: Time past schedule end (requires approval)
-    if (clockOut > schedEnd && lateOutApproved) {
-      otMinutes += Math.round(
+    // Late Out OT: time past schedule end (approval gated at pay calculation level)
+    if (clockOut > schedEnd) {
+      result.otLateOutMinutes = Math.round(
         (clockOut.getTime() - schedEnd.getTime()) / (1000 * 60)
       );
     }
+  }
 
-    // Component 2: Worked break time (automatic - no approval needed)
-    // If break was reduced/removed, the employee worked through their break
-    // This is OT regardless of lateOutApproved flag because it's not "staying late"
-    // e.g., 9AM-6PM schedule with 60min break = 8hr expected, but if break=0
-    // and employee clocks out at 6PM, they worked 9hr = 1hr OT from break
-    if (breakAdjustmentMinutes > 0) {
-      otMinutes += breakAdjustmentMinutes;
-    }
-
-    result.otLateOutMinutes = otMinutes;
+  // Break OT: worked break time (always auto-approved, separate from late-out OT)
+  // If break was reduced/removed, the employee worked through their break
+  // e.g., 9AM-6PM schedule with 60min break = 8hr expected, but if break=0
+  // and employee clocks out at 6PM, they worked 9hr = 1hr OT from break
+  if (breakAdjustmentMinutes > 0) {
+    result.otBreakMinutes = breakAdjustmentMinutes;
   }
 
   return result;

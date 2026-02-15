@@ -8,6 +8,7 @@
 import { app, BrowserWindow, ipcMain, shell } from "electron";
 import { autoUpdater } from "electron-updater";
 import path from "path";
+import fs from "fs";
 import { spawn, ChildProcess } from "child_process";
 
 let mainWindow: BrowserWindow | null = null;
@@ -34,7 +35,9 @@ function createWindow() {
       contextIsolation: true,
     },
     titleBarStyle: "default",
-    icon: path.join(__dirname, "../public/icon.png"),
+    icon: isDev
+      ? path.join(__dirname, "../public/icon.png")
+      : path.join(process.resourcesPath, "payload", "public", "icon.png"),
     show: false, // Don't show until ready
   });
 
@@ -87,6 +90,37 @@ function getNodePath(): string {
   }
 }
 
+/**
+ * Parse a .env file into a key-value object.
+ * Handles quoted values and comments.
+ */
+function parseEnvFile(filePath: string): Record<string, string> {
+  const env: Record<string, string> = {};
+  try {
+    if (!fs.existsSync(filePath)) return env;
+    const content = fs.readFileSync(filePath, "utf-8");
+    for (const line of content.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      const eqIndex = trimmed.indexOf("=");
+      if (eqIndex <= 0) continue;
+      const key = trimmed.substring(0, eqIndex);
+      let value = trimmed.substring(eqIndex + 1);
+      // Strip surrounding quotes
+      if (
+        (value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'"))
+      ) {
+        value = value.slice(1, -1);
+      }
+      env[key] = value;
+    }
+  } catch (e) {
+    console.warn("Could not read .env file:", e);
+  }
+  return env;
+}
+
 async function startServer(): Promise<void> {
   return new Promise((resolve, reject) => {
     if (isDev) {
@@ -95,21 +129,28 @@ async function startServer(): Promise<void> {
       return;
     }
 
-    // In production, start the Next.js standalone server
-    const serverPath = path.join(app.getAppPath(), ".next", "standalone", "server.js");
+    // In production, the Next.js payload lives in extraResources (outside asar)
+    // because the spawned child node.exe cannot read from inside asar archives.
+    const payloadDir = path.join(process.resourcesPath, "payload");
+    const serverPath = path.join(payloadDir, "server.js");
     const nodePath = getNodePath();
 
     console.log(`Starting server with Node.js: ${nodePath}`);
     console.log(`Server script: ${serverPath}`);
+    console.log(`Working directory: ${payloadDir}`);
+
+    // Load .env from payload directory
+    const envFromFile = parseEnvFile(path.join(payloadDir, ".env"));
 
     serverProcess = spawn(nodePath, [serverPath], {
       env: {
         ...process.env,
+        ...envFromFile,
         PORT: String(PORT),
         HOSTNAME: HOSTNAME,
         NODE_ENV: "production",
       },
-      cwd: path.join(app.getAppPath()),
+      cwd: payloadDir,
     });
 
     serverProcess.stdout?.on("data", (data) => {

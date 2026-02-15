@@ -24,6 +24,7 @@ import {
   calculateHolidayPremiumPay,
   calculateRestDayPremiumPay,
   calculateUnworkedRegularHolidayPay,
+  getDayRates,
   PH_MULTIPLIERS,
   type DerivedRates,
 } from "./wage-calculator";
@@ -59,6 +60,7 @@ const SORT_ORDER = {
   TAX_WITHHOLDING: 1200,
   CASH_ADVANCE_DEDUCTION: 1300,
   LOAN_DEDUCTION: 1310,
+  PENALTY_DEDUCTION: 1350,
   ADJUSTMENT_DEDUCT: 1400,
   OTHER_DEDUCTION: 1500,
 } as const;
@@ -340,11 +342,13 @@ export function generateNightDiffLine(
 
 /**
  * Generate holiday premium lines from attendance records.
+ * Uses per-day rate resolution when dailyRateOverride is set.
  */
 export function generateHolidayPremiumLines(
   attendance: AttendanceDayInput[],
   rates: DerivedRates,
-  standardMinutesPerDay: number
+  standardMinutesPerDay: number,
+  standardHoursPerDay: number = 8
 ): ComputedPayslipLine[] {
   const lines: ComputedPayslipLine[] = [];
 
@@ -363,23 +367,26 @@ export function generateHolidayPremiumLines(
   // Per DOLE: Regular Holiday worked = 200% of daily rate
   // IMPORTANT: Cap at standard minutes per day - excess goes to Holiday OT (260%)
   if (regularHolidays.length > 0) {
-    // Cap each day's worked minutes at standard hours, sum the capped values
-    const totalRegularMinutes = regularHolidays.reduce((sum, a) => {
+    let totalRegularMinutes = 0;
+    let totalAmount = 0;
+
+    for (const a of regularHolidays) {
+      const dayRates = getDayRates(rates, standardHoursPerDay, a.dailyRateOverride);
       const cappedMinutes = Math.min(a.workedMinutes, standardMinutesPerDay);
-      return sum + cappedMinutes;
-    }, 0);
+      totalRegularMinutes += cappedMinutes;
+      totalAmount += dayRates.hourlyRate * (cappedMinutes / 60) * PH_MULTIPLIERS.REGULAR_HOLIDAY;
+    }
 
-    // Full holiday pay = hourlyRate × hours × 200%
-    const amount = Math.round(rates.hourlyRate * (totalRegularMinutes / 60) * PH_MULTIPLIERS.REGULAR_HOLIDAY * 100) / 100;
+    totalAmount = Math.round(totalAmount * 100) / 100;
 
-    if (amount > 0) {
+    if (totalAmount > 0) {
       lines.push({
         category: "HOLIDAY_PAY",
         description: `Regular Holiday Pay (${totalRegularMinutes} mins @ 200%)`,
         quantity: totalRegularMinutes,
         rate: rates.minuteRate,
         multiplier: PH_MULTIPLIERS.REGULAR_HOLIDAY,
-        amount,
+        amount: totalAmount,
         sortOrder: SORT_ORDER.REGULAR_HOLIDAY_PAY,
         ruleCode: "REGULAR_HOLIDAY_WORKED",
         ruleDescription: "Regular Holiday Pay (200% of regular rate)",
@@ -391,23 +398,26 @@ export function generateHolidayPremiumLines(
   // Per DOLE: Special Holiday worked = 130% of daily rate (no work, no pay rule applies)
   // IMPORTANT: Cap at standard minutes per day - excess goes to Holiday OT
   if (specialHolidays.length > 0) {
-    // Cap each day's worked minutes at standard hours
-    const totalRegularMinutes = specialHolidays.reduce((sum, a) => {
+    let totalRegularMinutes = 0;
+    let totalAmount = 0;
+
+    for (const a of specialHolidays) {
+      const dayRates = getDayRates(rates, standardHoursPerDay, a.dailyRateOverride);
       const cappedMinutes = Math.min(a.workedMinutes, standardMinutesPerDay);
-      return sum + cappedMinutes;
-    }, 0);
+      totalRegularMinutes += cappedMinutes;
+      totalAmount += dayRates.hourlyRate * (cappedMinutes / 60) * PH_MULTIPLIERS.SPECIAL_HOLIDAY;
+    }
 
-    // Full holiday pay = hourlyRate × hours × 130%
-    const amount = Math.round(rates.hourlyRate * (totalRegularMinutes / 60) * PH_MULTIPLIERS.SPECIAL_HOLIDAY * 100) / 100;
+    totalAmount = Math.round(totalAmount * 100) / 100;
 
-    if (amount > 0) {
+    if (totalAmount > 0) {
       lines.push({
         category: "HOLIDAY_PAY",
         description: `Special Holiday Pay (${totalRegularMinutes} mins @ 130%)`,
         quantity: totalRegularMinutes,
         rate: rates.minuteRate,
         multiplier: PH_MULTIPLIERS.SPECIAL_HOLIDAY,
-        amount,
+        amount: totalAmount,
         sortOrder: SORT_ORDER.SPECIAL_HOLIDAY_PAY,
         ruleCode: "SPECIAL_HOLIDAY_WORKED",
         ruleDescription: "Special Holiday Pay (130% of regular rate)",
@@ -415,17 +425,22 @@ export function generateHolidayPremiumLines(
     }
   }
 
-  // Unworked regular holiday pay (only for monthly employees)
+  // Unworked regular holiday pay — per-day rate resolution
   if (unworkedRegularHolidays.length > 0) {
     const count = unworkedRegularHolidays.length;
-    const amount = calculateUnworkedRegularHolidayPay(rates) * count;
+    let totalAmount = 0;
+
+    for (const a of unworkedRegularHolidays) {
+      const dayRates = getDayRates(rates, standardHoursPerDay, a.dailyRateOverride);
+      totalAmount += dayRates.dailyRate;
+    }
 
     lines.push({
       category: "HOLIDAY_PAY",
       description: `Regular Holiday Pay - Unworked (${count} day${count > 1 ? "s" : ""})`,
       quantity: count,
       rate: rates.dailyRate,
-      amount,
+      amount: totalAmount,
       sortOrder: SORT_ORDER.REGULAR_HOLIDAY_PAY + 1,
       ruleCode: "REGULAR_HOLIDAY_UNWORKED",
       ruleDescription: "Regular Holiday Pay (paid even if not worked)",
@@ -437,10 +452,12 @@ export function generateHolidayPremiumLines(
 
 /**
  * Generate rest day premium line.
+ * Uses per-day rate resolution when dailyRateOverride is set.
  */
 export function generateRestDayPremiumLine(
   attendance: AttendanceDayInput[],
-  rates: DerivedRates
+  rates: DerivedRates,
+  standardHoursPerDay: number = 8
 ): ComputedPayslipLine | null {
   const restDayRecords = attendance.filter(
     (a) => a.dayType === "REST_DAY" && a.workedMinutes > 0
@@ -448,22 +465,28 @@ export function generateRestDayPremiumLine(
 
   if (restDayRecords.length === 0) return null;
 
-  const totalMinutes = restDayRecords.reduce((sum, a) => sum + a.workedMinutes, 0);
-  const amount = calculateRestDayPremiumPay(
-    totalMinutes,
-    rates,
-    PH_MULTIPLIERS.REST_DAY
-  );
+  let totalMinutes = 0;
+  let totalAmount = 0;
+  const premiumMultiplier = PH_MULTIPLIERS.REST_DAY - 1;
 
-  if (amount <= 0) return null;
+  for (const a of restDayRecords) {
+    const dayRates = getDayRates(rates, standardHoursPerDay, a.dailyRateOverride);
+    totalMinutes += a.workedMinutes;
+    const regularPay = dayRates.hourlyRate * (a.workedMinutes / 60);
+    totalAmount += regularPay * premiumMultiplier;
+  }
+
+  totalAmount = Math.round(totalAmount * 10000) / 10000;
+
+  if (totalAmount <= 0) return null;
 
   return {
     category: "REST_DAY_PAY",
     description: `Rest Day Premium (${totalMinutes} mins @ 130%)`,
     quantity: totalMinutes,
     rate: rates.minuteRate,
-    multiplier: PH_MULTIPLIERS.REST_DAY - 1,
-    amount,
+    multiplier: premiumMultiplier,
+    amount: totalAmount,
     sortOrder: SORT_ORDER.REST_DAY_PAY,
     ruleCode: "REST_DAY_PREMIUM",
     ruleDescription: "Rest Day Premium (30% additional)",

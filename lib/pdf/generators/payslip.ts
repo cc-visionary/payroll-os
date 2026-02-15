@@ -70,6 +70,7 @@ export interface PayslipAttendanceDay {
   otEarlyInMinutes: number;
   otLateOutMinutes: number;
   otRestDayMinutes: number;
+  otBreakMinutes?: number;
   otHolidayMinutes: number;
   ndMinutes: number;
   // OT approval flags (early in/late out counts as OT only if approved)
@@ -156,6 +157,7 @@ const NON_STATUTORY_DEDUCTION_CATEGORIES = [
   "ABSENT_DEDUCTION",
   "CASH_ADVANCE_DEDUCTION",
   "LOAN_DEDUCTION",
+  "PENALTY_DEDUCTION",
   "ADJUSTMENT_DEDUCT",
   "OTHER_DEDUCTION",
 ];
@@ -660,7 +662,7 @@ export async function generatePayslipPDF(
   doc.moveDown(0.5);
 
   // Table headers matching UI
-  const attHeaders = ["Date", "Day", "Shift", "Clock In", "Clock Out", "Hours", "Status", "Deduction", "Overtime", "ND"];
+  const attHeaders = ["Date", "Day", "Shift", "Clock In", "Clock Out", "Hours", "Notes", "Deduction", "Overtime", "ND"];
   const attColWidths = [50, 30, 55, 50, 50, 35, 65, 50, 50, 35]; // Total: 470
   const attTableWidth = attColWidths.reduce((a, b) => a + b, 0);
   const attRowHeight = 18;
@@ -674,92 +676,6 @@ export async function generatePayslipPDF(
   const getDayName = (date: Date): string => {
     const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
     return days[new Date(date).getDay()];
-  };
-
-  // Helper to get status display - returns array for multiple badges
-  // Uses the effective attendanceStatus from server (already includes priority logic)
-  const getStatusDisplayMulti = (record: PayslipAttendanceDay): { label: string; bgColor: string; textColor: string; subLabel?: string }[] => {
-    const hasWork = record.workedMinutes > 0;
-    const status = record.attendanceStatus || "";
-    const badges: { label: string; bgColor: string; textColor: string; subLabel?: string }[] = [];
-
-    // Add work status badge for worked days
-    if (hasWork) {
-      badges.push({ label: "Present", bgColor: "#dcfce7", textColor: "#166534" });
-
-      // If worked on a holiday, also show holiday badge
-      if (record.holidayType || record.dayType === "REGULAR_HOLIDAY" || record.dayType === "SPECIAL_HOLIDAY") {
-        const isRegular = record.holidayType === "REGULAR_HOLIDAY" || record.dayType === "REGULAR_HOLIDAY";
-        badges.push({
-          label: isRegular ? "Reg Hol" : "Spl Hol",
-          bgColor: isRegular ? "#fef3c7" : "#e0e7ff",
-          textColor: isRegular ? "#92400e" : "#4338ca",
-          subLabel: record.holidayName || undefined,
-        });
-      }
-    } else {
-      // Not worked - use effective status
-      switch (status) {
-        case "ON_LEAVE":
-          badges.push({
-            label: "On Leave",
-            bgColor: "#dbeafe",
-            textColor: "#1e40af",
-            subLabel: record.leaveTypeName || undefined,
-          });
-          break;
-        case "REST_DAY":
-          badges.push({ label: "Rest Day", bgColor: "#f3f4f6", textColor: "#374151" });
-          break;
-        case "REGULAR_HOLIDAY":
-          badges.push({
-            label: "Reg Hol",
-            bgColor: "#fef3c7",
-            textColor: "#92400e",
-            subLabel: record.holidayName || undefined,
-          });
-          break;
-        case "SPECIAL_HOLIDAY":
-          badges.push({
-            label: "Spl Hol",
-            bgColor: "#e0e7ff",
-            textColor: "#4338ca",
-            subLabel: record.holidayName || undefined,
-          });
-          break;
-        case "ABSENT":
-          badges.push({ label: "Absent", bgColor: "#fee2e2", textColor: "#991b1b" });
-          break;
-        default:
-          // Fallback to dayType for older records
-          switch (record.dayType) {
-            case "REST_DAY":
-              badges.push({ label: "Rest Day", bgColor: "#f3f4f6", textColor: "#374151" });
-              break;
-            case "REGULAR_HOLIDAY":
-              badges.push({
-                label: "Reg Hol",
-                bgColor: "#fef3c7",
-                textColor: "#92400e",
-                subLabel: record.holidayName || undefined,
-              });
-              break;
-            case "SPECIAL_HOLIDAY":
-              badges.push({
-                label: "Spl Hol",
-                bgColor: "#e0e7ff",
-                textColor: "#4338ca",
-                subLabel: record.holidayName || undefined,
-              });
-              break;
-            case "WORKDAY":
-              badges.push({ label: "Absent", bgColor: "#fee2e2", textColor: "#991b1b" });
-              break;
-          }
-      }
-    }
-
-    return badges.length > 0 ? badges : [{ label: record.dayType || status, bgColor: "#f3f4f6", textColor: "#374151" }];
   };
 
   // Draw table header
@@ -824,12 +740,12 @@ export async function generatePayslipPDF(
 
     // Calculate values
     const lateUt = record.lateMinutes + record.undertimeMinutes;
+    const otBreak = record.otBreakMinutes || 0;
     const otRegular = (record.earlyInApproved ? (record.otEarlyInMinutes || 0) : 0) +
-                      (record.lateOutApproved ? (record.otLateOutMinutes || 0) : 0);
+                      (record.lateOutApproved ? (record.otLateOutMinutes || 0) : 0) + otBreak;
     const otOther = (record.otRestDayMinutes || 0) + (record.otHolidayMinutes || 0);
     const totalOt = otRegular + otOther;
     const hours = record.workedMinutes > 0 ? (record.workedMinutes / 60).toFixed(1) : "-";
-    const statusBadges = getStatusDisplayMulti(record);
     const isLate = record.lateMinutes > 0;
     const isUndertime = record.undertimeMinutes > 0;
 
@@ -880,46 +796,12 @@ export async function generatePayslipPDF(
     });
     attColX += attColWidths[5];
 
-    // Status badges - support multiple badges with holiday names
-    const statusColWidth = attColWidths[6];
-    let badgeX = attColX + attPadding;
-    const badgeY = startY + 2;
-    const badgeHeight = 10;
-    const badgeSpacing = 2;
-
-    // Find if any badge has a holiday name to display
-    const holidayBadge = statusBadges.find(b => b.subLabel);
-
-    if (holidayBadge) {
-      // Holiday with name - show badge on top, name below
-      const badgeWidth = Math.min(statusColWidth - attPadding * 2, 30);
-      doc.fillColor(holidayBadge.bgColor).roundedRect(badgeX, badgeY, badgeWidth, badgeHeight, 2).fill();
-      doc.fillColor(holidayBadge.textColor).fontSize(5).text(holidayBadge.label, badgeX, badgeY + 2.5, {
-        width: badgeWidth,
-        align: "center",
-      });
-      // Holiday name below badge (truncated if too long)
-      const holidayName = holidayBadge.subLabel!.length > 12
-        ? holidayBadge.subLabel!.substring(0, 11) + "…"
-        : holidayBadge.subLabel!;
-      doc.fillColor("#6b7280").fontSize(4.5).text(holidayName, attColX + attPadding, badgeY + badgeHeight + 1, {
-        width: statusColWidth - attPadding * 2,
-        align: "left",
-      });
-    } else {
-      // Regular badges without holiday names
-      const maxBadgeWidth = (statusColWidth - attPadding * 2 - badgeSpacing * (statusBadges.length - 1)) / statusBadges.length;
-      statusBadges.forEach((badge) => {
-        const badgeWidth = Math.min(maxBadgeWidth, 30);
-        doc.fillColor(badge.bgColor).roundedRect(badgeX, badgeY, badgeWidth, badgeHeight, 2).fill();
-        doc.fillColor(badge.textColor).fontSize(5).text(badge.label, badgeX, badgeY + 2.5, {
-          width: badgeWidth,
-          align: "center",
-        });
-        badgeX += badgeWidth + badgeSpacing;
-      });
-    }
-    doc.fontSize(attFontSize);
+    // Notes column
+    const notesText = record.notes || "-";
+    doc.fillColor("#374151").text(notesText, attColX + attPadding, startY + 5, {
+      width: attColWidths[6] - attPadding * 2,
+      align: "left",
+    });
     attColX += attColWidths[6];
 
     // Deduction (Late + UT) - in red

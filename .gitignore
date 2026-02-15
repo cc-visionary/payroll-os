@@ -24,6 +24,7 @@
 /dist
 /dist-electron
 /node-runtime
+/resources/payload
 
 # misc
 .DS_Store

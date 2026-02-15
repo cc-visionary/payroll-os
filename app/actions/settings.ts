@@ -538,19 +538,19 @@ export async function createShiftTemplate(data: {
   }
 
   // Parse times
-  const startTime = new Date(`1970-01-01T${data.startTime}:00`);
-  const endTime = new Date(`1970-01-01T${data.endTime}:00`);
+  const startTime = new Date(`1970-01-01T${data.startTime}:00Z`);
+  const endTime = new Date(`1970-01-01T${data.endTime}:00Z`);
 
   // Calculate scheduled work minutes
   let scheduledMinutes: number;
   if (data.isOvernight) {
-    scheduledMinutes = (24 * 60 - startTime.getHours() * 60 - startTime.getMinutes()) +
-                       (endTime.getHours() * 60 + endTime.getMinutes());
+    scheduledMinutes = (24 * 60 - startTime.getUTCHours() * 60 - startTime.getUTCMinutes()) +
+                       (endTime.getUTCHours() * 60 + endTime.getUTCMinutes());
   } else {
     scheduledMinutes =
-      endTime.getHours() * 60 +
-      endTime.getMinutes() -
-      (startTime.getHours() * 60 + startTime.getMinutes());
+      endTime.getUTCHours() * 60 +
+      endTime.getUTCMinutes() -
+      (startTime.getUTCHours() * 60 + startTime.getUTCMinutes());
   }
 
   // Subtract break
@@ -559,10 +559,10 @@ export async function createShiftTemplate(data: {
 
   // Parse break times if provided
   const breakStartTime = data.breakStartTime
-    ? new Date(`1970-01-01T${data.breakStartTime}:00`)
+    ? new Date(`1970-01-01T${data.breakStartTime}:00Z`)
     : null;
   const breakEndTime = data.breakEndTime
-    ? new Date(`1970-01-01T${data.breakEndTime}:00`)
+    ? new Date(`1970-01-01T${data.breakEndTime}:00Z`)
     : null;
 
   try {
@@ -653,31 +653,31 @@ export async function updateShiftTemplate(
   if (data.isActive !== undefined) updateData.isActive = data.isActive;
 
   if (data.startTime) {
-    updateData.startTime = new Date(`1970-01-01T${data.startTime}:00`);
+    updateData.startTime = new Date(`1970-01-01T${data.startTime}:00Z`);
   }
   if (data.endTime) {
-    updateData.endTime = new Date(`1970-01-01T${data.endTime}:00`);
+    updateData.endTime = new Date(`1970-01-01T${data.endTime}:00Z`);
   }
 
   // Handle break times - set to null if breakMinutes is 0
   if (data.breakStartTime !== undefined) {
     updateData.breakStartTime = data.breakStartTime
-      ? new Date(`1970-01-01T${data.breakStartTime}:00`)
+      ? new Date(`1970-01-01T${data.breakStartTime}:00Z`)
       : null;
   }
   if (data.breakEndTime !== undefined) {
     updateData.breakEndTime = data.breakEndTime
-      ? new Date(`1970-01-01T${data.breakEndTime}:00`)
+      ? new Date(`1970-01-01T${data.breakEndTime}:00Z`)
       : null;
   }
 
   // Recalculate scheduled work minutes if times changed
   if (data.startTime || data.endTime || data.breakMinutes !== undefined || data.isOvernight !== undefined) {
     const startTime = data.startTime
-      ? new Date(`1970-01-01T${data.startTime}:00`)
+      ? new Date(`1970-01-01T${data.startTime}:00Z`)
       : shift.startTime;
     const endTime = data.endTime
-      ? new Date(`1970-01-01T${data.endTime}:00`)
+      ? new Date(`1970-01-01T${data.endTime}:00Z`)
       : shift.endTime;
     const isOvernight = data.isOvernight ?? shift.isOvernight;
     const breakMinutes = data.breakMinutes ?? shift.breakMinutes;
@@ -686,15 +686,15 @@ export async function updateShiftTemplate(
     if (isOvernight) {
       scheduledMinutes =
         24 * 60 -
-        startTime.getHours() * 60 -
-        startTime.getMinutes() +
-        endTime.getHours() * 60 +
-        endTime.getMinutes();
+        startTime.getUTCHours() * 60 -
+        startTime.getUTCMinutes() +
+        endTime.getUTCHours() * 60 +
+        endTime.getUTCMinutes();
     } else {
       scheduledMinutes =
-        endTime.getHours() * 60 +
-        endTime.getMinutes() -
-        (startTime.getHours() * 60 + startTime.getMinutes());
+        endTime.getUTCHours() * 60 +
+        endTime.getUTCMinutes() -
+        (startTime.getUTCHours() * 60 + startTime.getUTCMinutes());
     }
     scheduledMinutes -= breakMinutes;
     updateData.scheduledWorkMinutes = scheduledMinutes;

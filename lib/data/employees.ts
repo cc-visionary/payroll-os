@@ -505,6 +505,10 @@ export interface EmployeePayslipSummary {
   grossPay: string;
   totalDeductions: string;
   netPay: string;
+  sssEe: string;
+  philhealthEe: string;
+  pagibigEe: string;
+  withholdingTax: string;
   pdfPath: string | null;
   pdfGeneratedAt: string | null;
   createdAt: string;
@@ -601,6 +605,10 @@ export const getEmployeePayslips = cache(async (employeeId: string): Promise<Emp
     grossPay: p.grossPay.toString(),
     totalDeductions: p.totalDeductions.toString(),
     netPay: p.netPay.toString(),
+    sssEe: p.sssEe.toString(),
+    philhealthEe: p.philhealthEe.toString(),
+    pagibigEe: p.pagibigEe.toString(),
+    withholdingTax: p.withholdingTax.toString(),
     pdfPath: p.pdfPath,
     pdfGeneratedAt: p.pdfGeneratedAt?.toISOString() ?? null,
     createdAt: p.createdAt.toISOString(),

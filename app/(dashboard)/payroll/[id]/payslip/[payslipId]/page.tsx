@@ -288,14 +288,18 @@ export default function PayslipDetailPage({
       otRestDayMinutes: record.otRestDayMinutes,
       otHolidayMinutes: record.otHolidayMinutes,
       isOtApproved: record.isOtApproved,
+      earlyInApproved: record.earlyInApproved,
+      lateOutApproved: record.lateOutApproved,
       nightDiffMinutes: record.nightDiffMinutes,
       breakMinutes: record.breakMinutes,
       shiftBreakMinutes: record.shiftBreakMinutes,
-      hasOverride: hasBreakOverride || record.earlyInApproved || record.lateOutApproved,
-      override: hasBreakOverride || record.earlyInApproved || record.lateOutApproved ? {
+      dailyRateOverride: record.dailyRateOverride ?? null,
+      hasOverride: hasBreakOverride || record.earlyInApproved || record.lateOutApproved || record.dailyRateOverride != null,
+      override: hasBreakOverride || record.earlyInApproved || record.lateOutApproved || record.dailyRateOverride != null ? {
         breakMinutesOverride: record.breakMinutesApplied,
         earlyInApproved: record.earlyInApproved,
         lateOutApproved: record.lateOutApproved,
+        dailyRateOverride: record.dailyRateOverride ?? null,
         reason: "",
       } : undefined,
     };
@@ -304,6 +308,7 @@ export default function PayslipDetailPage({
   // Map PayslipAttendanceRecord to AttendanceRecordForEdit for the modal
   const mapRecordForEdit = (record: PayslipAttendanceRecord): AttendanceRecordForEdit => {
     const hasBreakOverride = record.breakMinutesApplied !== null;
+    const hasAnyOverride = hasBreakOverride || record.earlyInApproved || record.lateOutApproved || record.dailyRateOverride != null;
     return {
       id: record.id,
       date: record.date,
@@ -315,11 +320,13 @@ export default function PayslipDetailPage({
       scheduledEndTime: record.scheduledEnd,
       breakMinutes: record.breakMinutes,
       shiftBreakMinutes: record.shiftBreakMinutes,
-      hasOverride: hasBreakOverride || record.earlyInApproved || record.lateOutApproved,
-      override: hasBreakOverride || record.earlyInApproved || record.lateOutApproved ? {
+      dailyRateOverride: record.dailyRateOverride ?? null,
+      hasOverride: hasAnyOverride,
+      override: hasAnyOverride ? {
         breakMinutesOverride: record.breakMinutesApplied,
         earlyInApproved: record.earlyInApproved,
         lateOutApproved: record.lateOutApproved,
+        dailyRateOverride: record.dailyRateOverride ?? null,
         reason: "",
       } : undefined,
     };
@@ -348,6 +355,7 @@ export default function PayslipDetailPage({
       breakMinutes: data.breakMinutes,
       earlyInApproved: data.earlyInApproved,
       lateOutApproved: data.lateOutApproved,
+      dailyRateOverride: data.dailyRateOverride,
       reason: data.reason,
       reasonCode: data.reasonCode,
     });

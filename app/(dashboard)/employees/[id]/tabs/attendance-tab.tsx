@@ -229,8 +229,15 @@ export function AttendanceTab({ employeeId, canEdit = false }: AttendanceTabProp
     scheduledEndTime: entry.scheduledEndTime,
     breakMinutes: entry.breakMinutes,
     shiftBreakMinutes: entry.shiftBreakMinutes,
+    dailyRateOverride: entry.dailyRateOverride,
     hasOverride: entry.hasOverride,
-    override: entry.override,
+    override: entry.override ? {
+      breakMinutesOverride: entry.override.breakMinutesOverride,
+      earlyInApproved: entry.override.earlyInApproved,
+      lateOutApproved: entry.override.lateOutApproved,
+      dailyRateOverride: entry.override.dailyRateOverride ?? null,
+      reason: entry.override.reason,
+    } : undefined,
   });
 
   const openDeleteModal = (entry: EmployeeAttendanceEntry) => {
@@ -277,6 +284,7 @@ export function AttendanceTab({ employeeId, canEdit = false }: AttendanceTabProp
         breakMinutes: data.breakMinutes,
         earlyInApproved: data.earlyInApproved,
         lateOutApproved: data.lateOutApproved,
+        dailyRateOverride: data.dailyRateOverride,
         reason: data.reason,
         reasonCode: data.reasonCode,
       });
@@ -727,11 +735,29 @@ export function AttendanceTab({ employeeId, canEdit = false }: AttendanceTabProp
                           )}
                         </td>
                         <td className="px-4 py-3 text-right text-gray-900">
-                          {entry.totalOvertimeMinutes > 0 ? (
-                            <span className="text-green-600" title={`${entry.earlyInMinutes}m early in + ${entry.lateOutMinutes}m late out`}>
-                              {formatMinutes(entry.totalOvertimeMinutes)}
-                            </span>
-                          ) : (
+                          {entry.totalOvertimeMinutes > 0 ? (() => {
+                            const breakOt = entry.breakOtMinutes || 0;
+                            const approvedOt = (entry.earlyInApproved ? entry.earlyInMinutes : 0)
+                              + (entry.lateOutApproved ? entry.lateOutMinutes : 0)
+                              + breakOt;
+                            const pendingOt = (!entry.earlyInApproved ? entry.earlyInMinutes : 0)
+                              + (!entry.lateOutApproved ? entry.lateOutMinutes : 0);
+                            return (
+                              <div className="space-y-0.5">
+                                {approvedOt > 0 && (
+                                  <span className="text-green-600 block">
+                                    {formatMinutes(approvedOt)}
+                                  </span>
+                                )}
+                                {pendingOt > 0 && (
+                                  <span className="text-yellow-600 block">
+                                    {formatMinutes(pendingOt)}
+                                    <span className="text-xs ml-1">(pending)</span>
+                                  </span>
+                                )}
+                              </div>
+                            );
+                          })() : (
                             <span className="text-gray-400">-</span>
                           )}
                         </td>

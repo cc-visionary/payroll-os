@@ -35,13 +35,24 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # ── Create .env for build ──────────────────────────────────────
+      - name: Create .env file
+        shell: pwsh
+        run: |
+          @"
+          DATABASE_URL=${{ secrets.DATABASE_URL }}
+          JWT_SECRET=${{ secrets.JWT_SECRET }}
+          NODE_ENV=production
+          "@ | Out-File -Encoding utf8NoBOM -FilePath .env
+
+      # ── Prisma ─────────────────────────────────────────────────────
       - name: Generate Prisma client
         run: npx prisma generate
 
+      # ── Download bundled Node.js runtime ───────────────────────────
       - name: Download Node.js runtime for bundling
         shell: pwsh
         run: |
-          # Download Node.js for Windows to bundle with the app
           $nodeVersion = "20.11.1"
           $nodeUrl = "https://nodejs.org/dist/v$nodeVersion/node-v$nodeVersion-win-x64.zip"
           $downloadPath = "node-runtime.zip"
@@ -54,27 +65,102 @@ jobs:
           Write-Host "Extracting..."
           Expand-Archive -Path $downloadPath -DestinationPath $extractPath -Force
 
-          # Create target directory with just the essential files
           New-Item -ItemType Directory -Path $targetPath -Force | Out-Null
-
-          # Copy only the essential files (node.exe and required DLLs)
           $sourceDir = "$extractPath/node-v$nodeVersion-win-x64"
           Copy-Item "$sourceDir/node.exe" "$targetPath/"
 
-          # Clean up
           Remove-Item $downloadPath -Force
           Remove-Item $extractPath -Recurse -Force
 
           Write-Host "Node.js runtime prepared at $targetPath"
           Get-ChildItem $targetPath
 
+      # ── Build Next.js ──────────────────────────────────────────────
+      - name: Build Next.js
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+        run: npm run build
+
+      # ── Debug: Verify standalone output ────────────────────────────
+      - name: Debug - Verify standalone output
+        shell: pwsh
+        run: |
+          Write-Host "=== .next/standalone root ==="
+          Get-ChildItem ".next/standalone" | Select-Object Name
+          Write-Host ""
+          Write-Host "=== server.js exists ==="
+          Test-Path ".next/standalone/server.js"
+          Write-Host ""
+          Write-Host "=== node_modules count ==="
+          if (Test-Path ".next/standalone/node_modules") {
+            (Get-ChildItem ".next/standalone/node_modules" -Directory).Count
+          } else {
+            Write-Host "node_modules NOT found in standalone root"
+          }
+
+      # ── Compile Electron TypeScript ────────────────────────────────
+      - name: Compile Electron TypeScript
+        run: npm run electron:compile
+
+      # ── Assemble payload ───────────────────────────────────────────
+      - name: Assemble payload
+        run: npm run build:payload
+
+      # ── Copy .env into payload ─────────────────────────────────────
+      - name: Copy .env to payload
+        shell: pwsh
+        run: |
+          Copy-Item ".env" "resources/payload/.env" -Force
+          Write-Host ".env copied to resources/payload/"
+
+      # ── Debug: Verify payload ──────────────────────────────────────
+      - name: Debug - Verify payload
+        shell: pwsh
+        run: |
+          Write-Host "=== resources/payload root ==="
+          Get-ChildItem "resources/payload" | Select-Object Name
+          Write-Host ""
+          Write-Host "=== node_modules/next exists ==="
+          Test-Path "resources/payload/node_modules/next"
+          Write-Host ""
+          Write-Host "=== .next/static exists ==="
+          Test-Path "resources/payload/.next/static"
+          Write-Host ""
+          Write-Host "=== prisma/schema.prisma exists ==="
+          Test-Path "resources/payload/prisma/schema.prisma"
+
+      # ── Validate build ─────────────────────────────────────────────
+      - name: Validate build
+        run: npm run build:validate
+
+      # ── Build installer and publish to GitHub Releases ─────────────
       - name: Build and publish
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          JWT_SECRET: ${{ secrets.JWT_SECRET }}
-        run: npm run electron:build -- --publish always --win
+        run: npx electron-builder --publish always --win
 
+      # ── Debug: Verify packaged output ──────────────────────────────
+      - name: Debug - Verify packaged output
+        if: always()
+        shell: pwsh
+        run: |
+          Write-Host "=== dist/ installer files ==="
+          Get-ChildItem "dist" -File | Select-Object Name, Length
+          Write-Host ""
+          Write-Host "=== payload in unpacked app ==="
+          $payloadPath = "dist/win-unpacked/resources/payload"
+          if (Test-Path $payloadPath) {
+            Write-Host "payload/ found"
+            Get-ChildItem $payloadPath | Select-Object Name
+            Write-Host ""
+            Write-Host "=== node_modules/next in packaged app ==="
+            Test-Path "$payloadPath/node_modules/next"
+          } else {
+            Write-Host "payload/ NOT found in packaged app!"
+          }
+
+      # ── Upload artifacts ───────────────────────────────────────────
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:

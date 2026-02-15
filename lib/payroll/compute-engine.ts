@@ -36,18 +36,9 @@ import type {
   PayFrequency,
 } from "./types";
 
-import { calculateDerivedRates, type DerivedRates } from "./wage-calculator";
+import { calculateDerivedRates, getDayRates, PH_MULTIPLIERS, type DerivedRates } from "./wage-calculator";
 
 import {
-  generateBasicPayLine,
-  generateLateDeductionLine,
-  generateUndertimeDeductionLine,
-  generateLateUtDeductionLine,
-  generateAbsentDeductionLine,
-  generateRegularOvertimeLine,
-  generateRestDayOvertimeLine,
-  generateHolidayOvertimeLine,
-  generateNightDiffLine,
   generateHolidayPremiumLines,
   generateRestDayPremiumLine,
   generateAllowanceLines,
@@ -99,6 +90,13 @@ export interface EmployeePayrollInput {
   // When true: Withholding tax uses full taxable earnings (earnings - statutory - non-taxable)
   // When false (default): Withholding tax uses only Basic Pay - Late/Undertime
   taxOnFullEarnings?: boolean;
+  // Penalty deductions (auto-loaded from active penalty installments)
+  penaltyDeductions?: Array<{
+    installmentId: string;
+    penaltyId: string;
+    description: string;
+    amount: number;
+  }>;
 }
 
 /**
@@ -195,57 +193,166 @@ export function computeEmployeePayslip(
   const standardMinutesPerDay = profile.standardHoursPerDay * 60;
   const periodsPerMonth = getPeriodsPerMonth(payPeriod.payFrequency);
 
-  // 2. Count work days in period
-  const workDays = countWorkDays(attendance);
+  // 2. Count work days and compute basic pay with per-day rate resolution
+  // When dailyRateOverride is set on a day, all derived rates for that day
+  // are recalculated from the override rate (affects basic pay, OT, late/UT, ND, holidays)
+  const hpd = profile.standardHoursPerDay;
 
-  // 3. Generate basic pay line
-  lines.push(
-    generateBasicPayLine(profile, rates, workDays, payPeriod.payFrequency)
-  );
+  const workDayAttendance = attendance.filter((a) => {
+    if (a.isOnLeave) return true;
+    if (
+      a.workedMinutes > 0 &&
+      a.dayType !== "REGULAR_HOLIDAY" &&
+      a.dayType !== "SPECIAL_HOLIDAY"
+    ) {
+      return true;
+    }
+    return false;
+  });
+  const workDays = workDayAttendance.length;
 
-  // 4. Generate deduction lines
-  const totalLate = sumAttendance(attendance, "lateMinutes");
-  const totalUndertime = sumAttendance(attendance, "undertimeMinutes");
-  const totalAbsent = sumAttendance(attendance, "absentMinutes");
-
-  // Combined Late/Undertime deduction line (uses minute_rate)
-  const lateUtLine = generateLateUtDeductionLine(totalLate, totalUndertime, rates);
-  if (lateUtLine) lines.push(lateUtLine);
-
-  // Absent deduction only applies to MONTHLY wage type
-  // For DAILY/HOURLY wage types, employees are only paid for days/hours worked,
-  // so absences are already "deducted" by not being included in basic pay
+  // 3. Generate basic pay lines — group by effective daily rate for breakdown
   if (profile.wageType === "MONTHLY") {
-    const absentLine = generateAbsentDeductionLine(
-      totalAbsent,
-      rates,
-      standardMinutesPerDay
-    );
-    if (absentLine) lines.push(absentLine);
+    // Monthly: single line, fixed pay
+    let basicPayTotal = 0;
+    for (const day of workDayAttendance) {
+      const dayRates = getDayRates(rates, hpd, day.dailyRateOverride);
+      basicPayTotal += dayRates.dailyRate;
+    }
+    basicPayTotal = round(basicPayTotal, 4);
+
+    lines.push({
+      category: "BASIC_PAY",
+      description:
+        payPeriod.payFrequency === "SEMI_MONTHLY"
+          ? "Basic Pay (Semi-Monthly)"
+          : "Basic Pay (Monthly)",
+      amount: basicPayTotal,
+      sortOrder: 100,
+      ruleCode: "BASIC_PAY",
+    });
+  } else {
+    // Daily/Hourly: group by effective daily rate for granular breakdown
+    const rateGroups = new Map<number, number>();
+    for (const day of workDayAttendance) {
+      const dayRates = getDayRates(rates, hpd, day.dailyRateOverride);
+      const effectiveRate = dayRates.dailyRate;
+      rateGroups.set(effectiveRate, (rateGroups.get(effectiveRate) || 0) + 1);
+    }
+
+    for (const [effectiveRate, dayCount] of rateGroups) {
+      lines.push({
+        category: "BASIC_PAY",
+        description: `Basic Pay (${dayCount} day${dayCount !== 1 ? "s" : ""})`,
+        quantity: dayCount,
+        rate: effectiveRate,
+        amount: round(effectiveRate * dayCount, 4),
+        sortOrder: 100,
+        ruleCode: "BASIC_PAY",
+      });
+    }
   }
 
-  // 5. Generate overtime lines
+  // 4. Generate deduction lines — per-day to support rate overrides
+  let totalLate = 0;
+  let totalUndertime = 0;
+  let totalAbsent = 0;
+  let lateUtDeductionAmount = 0;
+  let absentDeductionAmount = 0;
+
+  for (const day of attendance) {
+    const dayRates = getDayRates(rates, hpd, day.dailyRateOverride);
+
+    if (day.lateMinutes > 0) {
+      totalLate += day.lateMinutes;
+      lateUtDeductionAmount += dayRates.minuteRate * day.lateMinutes;
+    }
+    if (day.undertimeMinutes > 0) {
+      totalUndertime += day.undertimeMinutes;
+      lateUtDeductionAmount += dayRates.minuteRate * day.undertimeMinutes;
+    }
+    if (day.absentMinutes > 0) {
+      totalAbsent += day.absentMinutes;
+      const absentDays = day.absentMinutes / standardMinutesPerDay;
+      absentDeductionAmount += dayRates.dailyRate * absentDays;
+    }
+  }
+
+  // Combined Late/Undertime deduction line
+  const totalLateUtMinutes = totalLate + totalUndertime;
+  if (totalLateUtMinutes > 0) {
+    lateUtDeductionAmount = round(lateUtDeductionAmount, 2);
+    lines.push({
+      category: "LATE_UT_DEDUCTION",
+      description: `Late/Undertime Deduction (${totalLateUtMinutes} mins)`,
+      quantity: totalLateUtMinutes,
+      rate: rates.minuteRate,
+      amount: lateUtDeductionAmount,
+      sortOrder: 1015,
+      ruleCode: "LATE_UT_DEDUCT",
+    });
+  }
+
+  // Absent deduction only applies to MONTHLY wage type
+  if (profile.wageType === "MONTHLY" && totalAbsent > 0) {
+    absentDeductionAmount = round(absentDeductionAmount, 4);
+    const absentDays =
+      Math.round((totalAbsent / standardMinutesPerDay) * 100) / 100;
+    lines.push({
+      category: "ABSENT_DEDUCTION",
+      description: `Absent Deduction (${absentDays} days)`,
+      quantity: absentDays,
+      rate: rates.dailyRate,
+      amount: absentDeductionAmount,
+      sortOrder: 1020,
+      ruleCode: "ABSENT_DEDUCT",
+    });
+  }
+
+  // 5. Generate overtime lines — per-day rate resolution
   if (profile.isOtEligible) {
-    const otLines = generateOvertimeLines(attendance, rates, standardMinutesPerDay);
+    const otLines = generateOvertimeLines(attendance, rates, standardMinutesPerDay, hpd);
     lines.push(...otLines);
   }
 
-  // 6. Generate night differential line
+  // 6. Generate night differential line — per-day rate resolution
   if (profile.isNdEligible) {
-    const totalNd = sumAttendance(attendance, "nightDiffMinutes");
-    const ndLine = generateNightDiffLine(totalNd, rates);
-    if (ndLine) lines.push(ndLine);
+    let totalNdMinutes = 0;
+    let totalNdAmount = 0;
+    for (const day of attendance) {
+      if (day.nightDiffMinutes > 0) {
+        const dayRates = getDayRates(rates, hpd, day.dailyRateOverride);
+        totalNdMinutes += day.nightDiffMinutes;
+        totalNdAmount +=
+          dayRates.hourlyRate * (day.nightDiffMinutes / 60) * PH_MULTIPLIERS.NIGHT_DIFF;
+      }
+    }
+    if (totalNdMinutes > 0) {
+      totalNdAmount = round(totalNdAmount, 4);
+      lines.push({
+        category: "NIGHT_DIFFERENTIAL",
+        description: `Night Differential (${totalNdMinutes} mins @ 10%)`,
+        quantity: totalNdMinutes,
+        rate: rates.minuteRate,
+        multiplier: PH_MULTIPLIERS.NIGHT_DIFF,
+        amount: totalNdAmount,
+        sortOrder: 300,
+        ruleCode: "NIGHT_DIFF",
+        ruleDescription: "Night Differential (10%)",
+      });
+    }
   }
 
-  // 7. Generate holiday and rest day premium lines
+  // 7. Generate holiday and rest day premium lines — per-day rate resolution
   const holidayLines = generateHolidayPremiumLines(
     attendance,
     rates,
-    standardMinutesPerDay
+    standardMinutesPerDay,
+    hpd
   );
   lines.push(...holidayLines);
 
-  const restDayLine = generateRestDayPremiumLine(attendance, rates);
+  const restDayLine = generateRestDayPremiumLine(attendance, rates, hpd);
   if (restDayLine) lines.push(restDayLine);
 
   // 8. Generate allowance lines
@@ -260,6 +367,21 @@ export function computeEmployeePayslip(
   );
   lines.push(...adjustmentLines);
 
+  // 10. Generate penalty deduction lines
+  if (employee.penaltyDeductions && employee.penaltyDeductions.length > 0) {
+    for (const penalty of employee.penaltyDeductions) {
+      lines.push({
+        category: "PENALTY_DEDUCTION",
+        description: penalty.description,
+        amount: penalty.amount,
+        sortOrder: 1350,
+        penaltyInstallmentId: penalty.installmentId,
+        ruleCode: "PENALTY_DEDUCTION",
+        ruleDescription: "Penalty installment deduction",
+      });
+    }
+  }
+
   // 13. Calculate statutory deductions (if eligible)
   let sssEe = 0,
     sssEr = 0,
@@ -267,6 +389,10 @@ export function computeEmployeePayslip(
     philhealthEr = 0,
     pagibigEe = 0,
     pagibigEr = 0;
+
+  // Track current period's mode-aware taxable income for YTD accumulation.
+  // Initialized to 0 for non-statutory-eligible employees (no tax = no taxable income).
+  let currentPeriodTaxable = 0;
 
   const isStatutoryEligible = isEligibleForStatutory(
     regularization,
@@ -329,8 +455,6 @@ export function computeEmployeePayslip(
 
   if (isStatutoryEligible) {
     const taxTable = ruleset.taxTable || DEFAULT_TAX_TABLE_2023;
-
-    let currentPeriodTaxable: number;
 
     if (employee.taxOnFullEarnings) {
       // SUPER_ADMIN mode: Use full taxable earnings (all earnings - statutory - non-taxable)
@@ -422,8 +546,7 @@ export function computeEmployeePayslip(
   // Calculate YTD
   const ytdGrossPay = employee.previousYtd.grossPay + grossPay;
   const ytdTaxableIncome =
-    employee.previousYtd.taxableIncome +
-    Math.max(0, grossPay - sssEe - philhealthEe - pagibigEe);
+    employee.previousYtd.taxableIncome + currentPeriodTaxable;
   const ytdTaxWithheld = employee.previousYtd.taxWithheld + withholdingTax;
 
   return {
@@ -452,123 +575,128 @@ export function computeEmployeePayslip(
 // =============================================================================
 
 /**
- * Generate overtime lines from attendance records.
+ * Generate overtime lines from attendance records with per-day rate resolution.
  *
  * OT Approval Rules:
  * - Early in / late out OT: ONLY counted if explicitly approved (earlyInApproved/lateOutApproved)
  * - Rest day OT: Auto-approved (always counted)
  * - Holiday OT: Auto-approved (always counted)
  *
- * Holiday OT includes:
- * - Stored overtimeHolidayMinutes
- * - Excess minutes beyond standard hours (workedMinutes - standardMinutesPerDay)
+ * When dailyRateOverride is set on a day, OT is calculated using that day's override rate.
  */
 function generateOvertimeLines(
   attendance: AttendanceDayInput[],
   rates: DerivedRates,
-  standardMinutesPerDay: number
+  standardMinutesPerDay: number,
+  standardHoursPerDay: number
 ): ComputedPayslipLine[] {
   const lines: ComputedPayslipLine[] = [];
 
-  // IMPORTANT: Only count OT for days where employee actually worked (workedMinutes > 0)
-  // This prevents false OT earnings on rest days or holidays with no actual work rendered.
+  // Accumulate per-day OT amounts (not just minutes) to handle rate overrides
+  let regularOtMinutes = 0;
+  let regularOtAmount = 0;
+  let restDayOtMinutes = 0;
+  let restDayOtAmount = 0;
+  let regularHolidayOtMinutes = 0;
+  let regularHolidayOtAmount = 0;
+  let specialHolidayOtMinutes = 0;
+  let specialHolidayOtAmount = 0;
 
-  // Regular OT (regular work days) - only count APPROVED early in/late out
-  // AND only if there were actual worked minutes
-  const regularOt = attendance
-    .filter((a) => a.dayType === "WORKDAY" && a.workedMinutes > 0)
-    .reduce((sum, a) => {
+  for (const a of attendance) {
+    if (a.workedMinutes <= 0) continue;
+
+    const dayRates = getDayRates(rates, standardHoursPerDay, a.dailyRateOverride);
+
+    if (a.dayType === "WORKDAY") {
       const approvedEarlyIn = a.earlyInApproved ? a.otEarlyInMinutes : 0;
       const approvedLateOut = a.lateOutApproved ? a.otLateOutMinutes : 0;
-      return sum + approvedEarlyIn + approvedLateOut;
-    }, 0);
-
-  const regularOtLine = generateRegularOvertimeLine(
-    regularOt,
-    rates,
-    attendance.filter((a) => a.dayType === "WORKDAY" && a.workedMinutes > 0).map((a) => a.id)
-  );
-  if (regularOtLine) lines.push(regularOtLine);
-
-  // Rest day OT - auto-approved BUT only if there was actual work
-  const restDayOt = attendance
-    .filter((a) => a.dayType === "REST_DAY" && a.workedMinutes > 0)
-    .reduce((sum, a) => sum + a.overtimeRestDayMinutes, 0);
-  const restDayOtLine = generateRestDayOvertimeLine(restDayOt, rates);
-  if (restDayOtLine) lines.push(restDayOtLine);
-
-  // Holiday OT - Regular (requires approval via earlyIn/lateOut flags)
-  // Only counts approved OT fields to avoid double-counting with excess minutes
-  const regularHolidayOt = attendance
-    .filter((a) => a.dayType === "REGULAR_HOLIDAY" && a.workedMinutes > 0)
-    .reduce((sum, a) => {
-      // Only count approved early in/late out OT
+      const dayOtMinutes = approvedEarlyIn + approvedLateOut + a.otBreakMinutes;
+      if (dayOtMinutes > 0) {
+        regularOtMinutes += dayOtMinutes;
+        regularOtAmount += dayRates.hourlyRate * (dayOtMinutes / 60) * PH_MULTIPLIERS.OT_REGULAR;
+      }
+    } else if (a.dayType === "REST_DAY") {
+      if (a.overtimeRestDayMinutes > 0) {
+        restDayOtMinutes += a.overtimeRestDayMinutes;
+        restDayOtAmount += dayRates.hourlyRate * (a.overtimeRestDayMinutes / 60) * PH_MULTIPLIERS.REST_DAY_OT;
+      }
+    } else if (a.dayType === "REGULAR_HOLIDAY") {
       const approvedEarlyIn = a.earlyInApproved ? a.otEarlyInMinutes : 0;
       const approvedLateOut = a.lateOutApproved ? a.otLateOutMinutes : 0;
-      return sum + approvedEarlyIn + approvedLateOut;
-    }, 0);
-
-  const regularHolidayOtLine = generateHolidayOvertimeLine(
-    regularHolidayOt,
-    rates,
-    "REGULAR"
-  );
-  if (regularHolidayOtLine) lines.push(regularHolidayOtLine);
-
-  // Holiday OT - Special (requires approval via earlyIn/lateOut flags)
-  // Only counts approved OT fields to avoid double-counting with excess minutes
-  const specialHolidayOt = attendance
-    .filter((a) => a.dayType === "SPECIAL_HOLIDAY" && a.workedMinutes > 0)
-    .reduce((sum, a) => {
-      // Only count approved early in/late out OT
+      const dayOtMinutes = approvedEarlyIn + approvedLateOut + a.otBreakMinutes;
+      if (dayOtMinutes > 0) {
+        regularHolidayOtMinutes += dayOtMinutes;
+        regularHolidayOtAmount += dayRates.hourlyRate * (dayOtMinutes / 60) * PH_MULTIPLIERS.REGULAR_HOLIDAY_OT;
+      }
+    } else if (a.dayType === "SPECIAL_HOLIDAY") {
       const approvedEarlyIn = a.earlyInApproved ? a.otEarlyInMinutes : 0;
       const approvedLateOut = a.lateOutApproved ? a.otLateOutMinutes : 0;
-      return sum + approvedEarlyIn + approvedLateOut;
-    }, 0);
+      const dayOtMinutes = approvedEarlyIn + approvedLateOut + a.otBreakMinutes;
+      if (dayOtMinutes > 0) {
+        specialHolidayOtMinutes += dayOtMinutes;
+        specialHolidayOtAmount += dayRates.hourlyRate * (dayOtMinutes / 60) * PH_MULTIPLIERS.SPECIAL_HOLIDAY_OT;
+      }
+    }
+  }
 
-  const specialHolidayOtLine = generateHolidayOvertimeLine(
-    specialHolidayOt,
-    rates,
-    "SPECIAL"
-  );
-  if (specialHolidayOtLine) lines.push(specialHolidayOtLine);
+  // Generate aggregate lines
+  if (regularOtMinutes > 0) {
+    lines.push({
+      category: "OVERTIME_REGULAR",
+      description: `Regular Overtime (${regularOtMinutes} mins @ 125%)`,
+      quantity: regularOtMinutes,
+      rate: rates.minuteRate,
+      multiplier: PH_MULTIPLIERS.OT_REGULAR,
+      amount: round(regularOtAmount, 4),
+      sortOrder: 200,
+      ruleCode: "OT_REGULAR",
+      ruleDescription: "Regular Day Overtime (125%)",
+    });
+  }
+
+  if (restDayOtMinutes > 0) {
+    lines.push({
+      category: "OVERTIME_REST_DAY",
+      description: `Rest Day Overtime (${restDayOtMinutes} mins @ 169%)`,
+      quantity: restDayOtMinutes,
+      rate: rates.minuteRate,
+      multiplier: PH_MULTIPLIERS.REST_DAY_OT,
+      amount: round(restDayOtAmount, 4),
+      sortOrder: 210,
+      ruleCode: "OT_REST_DAY",
+      ruleDescription: "Rest Day Overtime (169%)",
+    });
+  }
+
+  if (regularHolidayOtMinutes > 0) {
+    lines.push({
+      category: "OVERTIME_HOLIDAY",
+      description: `Regular Holiday OT (${regularHolidayOtMinutes} mins @ 260%)`,
+      quantity: regularHolidayOtMinutes,
+      rate: rates.minuteRate,
+      multiplier: PH_MULTIPLIERS.REGULAR_HOLIDAY_OT,
+      amount: round(regularHolidayOtAmount, 4),
+      sortOrder: 220,
+      ruleCode: "OT_REGULAR_HOLIDAY",
+      ruleDescription: "Regular Holiday Overtime (260%)",
+    });
+  }
+
+  if (specialHolidayOtMinutes > 0) {
+    lines.push({
+      category: "OVERTIME_HOLIDAY",
+      description: `Special Holiday OT (${specialHolidayOtMinutes} mins @ 169%)`,
+      quantity: specialHolidayOtMinutes,
+      rate: rates.minuteRate,
+      multiplier: PH_MULTIPLIERS.SPECIAL_HOLIDAY_OT,
+      amount: round(specialHolidayOtAmount, 4),
+      sortOrder: 220,
+      ruleCode: "OT_SPECIAL_HOLIDAY",
+      ruleDescription: "Special Holiday Overtime (169%)",
+    });
+  }
 
   return lines;
-}
-
-/**
- * Count work days for Basic Pay calculation.
- *
- * Basic Pay = dailyRate × workDays
- *
- * Work days include:
- * - Regular work days where employee worked (workedMinutes > 0)
- * - Leave days (paid leave)
- *
- * Work days do NOT include:
- * - Unworked regular holidays (paid separately via "Regular Holiday Pay - Unworked")
- * - Worked regular holidays (paid separately via "Regular Holiday Premium")
- * - Special holidays (no work = no pay)
- * - Rest days without work
- */
-function countWorkDays(attendance: AttendanceDayInput[]): number {
-  return attendance.filter((a) => {
-    // Leave days count as work days (paid leave)
-    if (a.isOnLeave) return true;
-
-    // Days with actual work, but NOT holidays (holiday work gets premium, not basic pay)
-    // - REGULAR_HOLIDAY work → Holiday Premium (200%)
-    // - SPECIAL_HOLIDAY work → Holiday Premium (130%)
-    if (
-      a.workedMinutes > 0 &&
-      a.dayType !== "REGULAR_HOLIDAY" &&
-      a.dayType !== "SPECIAL_HOLIDAY"
-    ) {
-      return true;
-    }
-
-    return false;
-  }).length;
 }
 
 /**
@@ -623,6 +751,7 @@ function sumDeductions(lines: ComputedPayslipLine[]): number {
     "TAX_WITHHOLDING",
     "CASH_ADVANCE_DEDUCTION",
     "LOAN_DEDUCTION",
+    "PENALTY_DEDUCTION",
     "ADJUSTMENT_DEDUCT",
     "OTHER_DEDUCTION",
   ];

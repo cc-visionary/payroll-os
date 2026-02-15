@@ -109,6 +109,11 @@ export const Permission = {
   ROLE_VIEW: "role:view",
   ROLE_MANAGE: "role:manage",
 
+  // Penalties
+  PENALTY_VIEW: "penalty:view",
+  PENALTY_MANAGE: "penalty:manage",
+  PENALTY_TYPE_MANAGE: "penalty_type:manage",
+
   // Audit Logs
   AUDIT_VIEW: "audit:view",
 
@@ -143,6 +148,11 @@ export const RolePermissions: Record<string, PermissionValue[]> = {
     Permission.ATTENDANCE_APPROVE_ADJUSTMENT,
     Permission.LEAVE_VIEW,
     Permission.LEAVE_APPROVE,
+    Permission.PAYROLL_VIEW,
+    Permission.PAYROLL_RUN,
+    Permission.PAYROLL_EDIT,
+    Permission.PAYROLL_APPROVE,
+    Permission.PAYROLL_RELEASE,
     Permission.PAYSLIP_VIEW_ALL,
     Permission.DOCUMENT_GENERATE,
     Permission.DOCUMENT_VIEW,
@@ -169,8 +179,13 @@ export const RolePermissions: Record<string, PermissionValue[]> = {
     Permission.HIRING_EDIT,
     Permission.HIRING_CONVERT,
     Permission.USER_VIEW,
+    Permission.ROLE_VIEW,
+    Permission.ROLE_MANAGE,
     Permission.REPORT_VIEW,
     Permission.AUDIT_VIEW,
+    Permission.PENALTY_VIEW,
+    Permission.PENALTY_MANAGE,
+    Permission.PENALTY_TYPE_MANAGE,
   ],
 
   // Payroll Admin - runs and manages payroll
@@ -303,6 +318,11 @@ export const PermissionGroups = {
     Permission.USER_MANAGE,
     Permission.ROLE_VIEW,
     Permission.ROLE_MANAGE,
+  ],
+  Penalties: [
+    Permission.PENALTY_VIEW,
+    Permission.PENALTY_MANAGE,
+    Permission.PENALTY_TYPE_MANAGE,
   ],
   System: [Permission.AUDIT_VIEW, Permission.SYSTEM_SETTINGS],
 } as const;
